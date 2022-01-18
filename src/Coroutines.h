@@ -100,6 +100,7 @@ extern "C"
 ///
 /// @param next Pointer to the next Coroutine on the list.
 /// @param state The jmp_buf to hold the context of the coroutine.
+/// @param id The ID of the coroutine.
 typedef struct Coroutine {
   struct Coroutine *next;
   jmp_buf state;
