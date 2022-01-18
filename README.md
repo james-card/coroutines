@@ -10,6 +10,8 @@ This is a C coroutines library based on the work of [Tony Finch](http://www.dota
 * Provided a work-around for a bug in MSVC's 64-bit version of longjmp.
 
 # Example Usage
+Example of a simple set of routines in a round robin scheduler.  This configuration will have each function update the passed in value twice before releasing the mutex that gates operation.
+
 ```C
 #include <stdio.h>
 #include <assert.h>
@@ -189,9 +191,7 @@ int main(int argc, char **argv) {
   assert(arg == 42);
   coroutineSetId(coroArray[2], 2);
 
-  schedule(&arg);
-
-  return 0;
+  return schedule(&arg);
 }
 
 ```
