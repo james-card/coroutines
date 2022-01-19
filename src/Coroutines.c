@@ -48,6 +48,22 @@ void coroutineMain(void*);
 #define ZEROINIT(x) x = {0}
 #endif // __cplusplus
 
+/// @union FuncData
+///
+/// @brief Translation between a function pointer and a data pointer.
+///
+/// @details Due to the way this library works, we sometimes need to pass and
+/// return function pointers to our yield and resume functions, which take and
+/// return data pointers.  ISO C doesn't permit casting between these two, so
+/// we use a union to do the conversion.
+///
+/// @param func The function pointer portion of the pointer value.
+/// @param data The data pointer portion of the pointer value.
+typedef union FuncData {
+    void* (*func)(void*);
+    void* data;
+} FuncData;
+
 /// @var static Coroutine first
 ///
 /// @brief Library-private first (main) routine.
@@ -74,31 +90,31 @@ static Coroutine *running = &first;
 /// a new idle coroutine.
 static Coroutine *idle = NULL;
 
-/// @fn bool coroutineResumable(Coroutine *coro)
+/// @fn bool coroutineResumable(Coroutine *coroutine)
 ///
 /// @brief Examines a coroutine to determine whether or not it can be resumed.
 /// A coroutine can be resumed if it is not on the running or idle lists.
 ///
-/// @param coro A pointer to the Coroutine to examine.
+/// @param coroutine A pointer to the Coroutine to examine.
 ///
 /// @return Returns false when the coroutine has run to completion or when it is
 /// blocked inside coroutineResume().
-bool coroutineResumable(Coroutine *coro) {
-  return ((coro != NULL) && (coro->next == NULL));
+bool coroutineResumable(Coroutine *coroutine) {
+  return ((coroutine != NULL) && (coroutine->next == NULL));
 }
 
-/// @fn void coroutinePush(Coroutine **list, Coroutine *coro)
+/// @fn void coroutinePush(Coroutine **list, Coroutine *coroutine)
 ///
 /// @brief Add a coroutine to a list and get the previous head of the list.
 ///
 /// @param list The Coroutine list to push onto.
-/// @param coro A pointer to the Coroutine to push onto the list.
+/// @param coroutine A pointer to the Coroutine to push onto the list.
 ///
 /// @param Returns the previous head of the list.
-void coroutinePush(Coroutine **list, Coroutine *coro) {
-  if ((list != NULL) && (coro != NULL)) {
-    coro->next = *list;
-    *list = coro;
+void coroutinePush(Coroutine **list, Coroutine *coroutine) {
+  if ((list != NULL) && (coroutine != NULL)) {
+    coroutine->next = *list;
+    *list = coroutine;
   }
 }
 
@@ -110,15 +126,15 @@ void coroutinePush(Coroutine **list, Coroutine *coro) {
 ///
 /// @return Returns a pointer to the previous head of the list.
 Coroutine* coroutinePop(Coroutine **list) {
-  Coroutine *coro = NULL;
+  Coroutine *coroutine = NULL;
 
   if (list != NULL) {
-    coro = *list;
-    *list = coro->next;
-    coro->next = NULL;
+    coroutine = *list;
+    *list = coroutine->next;
+    coroutine->next = NULL;
   }
 
-  return coro;
+  return coroutine;
 }
 
 /// @var static void* saved
@@ -139,19 +155,19 @@ void* coroutinePass(Coroutine *currentCoroutine, void *arg) {
   if (currentCoroutine != NULL) {
     saved = arg;
 
-    if (!setjmp(currentCoroutine->state)) {
+    if (!setjmp(currentCoroutine->context)) {
       Coroutine *targetCoroutine = running;
 #if defined(_MSC_VER) && defined(_M_X64)
       // This should *NOT* be necessary.  The intent of longjmp is to restore
-      // the state of the registers captured at setjmp, however the MSVC x64
+      // the context of the registers captured at setjmp, however the MSVC x64
       // implementation of longjmp only does this if the value of
       // _JUMP_BUFFER.Frame is 0.  This is a non-standard and broken
       // implementation, but thankfully a workaround does exist, so I won't
       // complain beyond this comment.
-      _JUMP_BUFFER* state = (_JUMP_BUFFER*) &targetCoroutine->state;
-      state->Frame = 0;
+      _JUMP_BUFFER* context = (_JUMP_BUFFER*) &targetCoroutine->context;
+      context->Frame = 0;
 #endif // _MSC_VER
-      longjmp(targetCoroutine->state, 1);
+      longjmp(targetCoroutine->context, 1);
     }
   } else {
     saved = NULL;
@@ -202,7 +218,9 @@ void* coroutineYield(void *arg) {
 
   if (running != &first) {
     Coroutine *currentCoroutine = coroutinePop(&running);
+    currentCoroutine->state = BLOCKED;
     void *callingCoroutineArgument = coroutinePass(currentCoroutine, arg);
+    currentCoroutine->state = RUNNING;
     returnValue = callingCoroutineArgument;
   } // else, can't yield from the first coroutine.  Return NULL in this case.
 
@@ -238,7 +256,7 @@ Coroutine* coroutineCreate(void* func(void *arg)) {
   }
 
   // The current coroutine is at the head of the running list.
-  if ((idle == NULL) && (!setjmp(running->state))) {
+  if ((idle == NULL) && (!setjmp(running->context))) {
     // We've just been called from the calling function and need to create a
     // new Coroutine instance, including its stack.
     coroutineStart();
@@ -264,9 +282,9 @@ Coroutine* coroutineCreate(void* func(void *arg)) {
 /// the first function we are to run. (The head of the running list is the
 /// coroutine that forked us.) We pass the stack pointer to prevent it from
 /// being optimised away. The first time we are called we will return to the
-/// fork in the coroutine() constructor function (above); on subsequent calls
-/// we will resume the parent coroutineMain(). In both cases the passed value is
-/// lost when coroutinePass() longjmp()s to the forking setjmp().
+/// fork in the coroutineCreate() constructor function (above); on subsequent
+/// calls we will resume the parent coroutineMain(). In both cases the passed
+/// value is lost when coroutinePass() longjmp()s to the forking setjmp().
 ///
 /// When we are resumed, the idle list is empty again, so we fork another
 /// coroutine. When the child coroutineMain() passes control back to us, we drop
@@ -280,8 +298,8 @@ Coroutine* coroutineCreate(void* func(void *arg)) {
 /// When the function returns, we move ourself from the running list to the idle
 /// list, before passing the result back to the resumer. (This is just like
 /// coroutineYield() except for adding the coroutine to the idle list.) We can
-/// then only be resumed by the coroutine() constructor function which will put
-/// us back on the running list and pass us a new function to call.
+/// then only be resumed by the coroutineCreate() constructor function which
+/// will put us back on the running list and pass us a new function to call.
 void coroutineMain(void *ret) {
   ZEROINIT(Coroutine me);
   me.id = COROUTINE_ID_NOT_SET;
@@ -292,8 +310,11 @@ void coroutineMain(void *ret) {
   // call in the coroutine constructor or in the setjmp call below.  In the
   // former case, calling coroutinePass() here returns to the constructor and
   // waits for the constructor to provide the function pointer to call.  In the
-  // latter case, coroutinePass() will never return and thus provides a stack
-  // barrier.
+  // latter case, we allocate the next Coroutine and its stack that will be
+  // pushed onto the idle list (above).  When we call pass here, we will release
+  // the Coroutine currently being constructed from the setjmp below, allowing
+  // it to drop into its main loop and we will be on the idle stack ready to
+  // take in a new function pointer when we're resumed.
   FuncData funcData;
   funcData.data = coroutinePass(&me, ret);
   void *(*func)(void *arg);
@@ -303,8 +324,10 @@ void coroutineMain(void *ret) {
   // coroutineResume().  coroutineResume() pushed the new coroutine (the one
   // we're in the middle of constructing that was declared as "me" above) onto
   // the running list before returning control to us.  So the return point
-  // we're about to set is for ourself.
-  if (!setjmp(running->state)) {
+  // we're about to set is for ourself.  The call to coroutineStart here will
+  // allocate the next Coroutine on the idle list to be used in the next call
+  // to the constructor.
+  if (!setjmp(running->context)) {
     coroutineStart();
   }
   // We have just been passed execution from the coroutinePass() statement
@@ -315,6 +338,8 @@ void coroutineMain(void *ret) {
   // future invocation of the coroutineCreate() constructor.
   while (1) {
     // Return our Coroutine and get the function argument from the constructor.
+    // coroutineYield will set our state to BLOCKED on call and RUNNING on
+    // return.
     void* callingArgument = coroutineYield(&me);
 
     // Call the target function with the calling argument.
@@ -324,6 +349,7 @@ void coroutineMain(void *ret) {
     // next iteration of the constructor.
     Coroutine *currentCoroutine = coroutinePop(&running);
     currentCoroutine->id = COROUTINE_ID_NOT_SET;
+    currentCoroutine->state = NOT_RUNNING;
     coroutinePush(&idle, currentCoroutine);
 
     // Block until we're called from the constructor again.
@@ -343,42 +369,60 @@ void coroutineStart(void) {
   coroutineMain(stack);
 }
 
-/// @fn int coroutineSetId(Coroutine* coro, int64_t id)
+/// @fn int coroutineSetId(Coroutine* coroutine, int64_t id)
 ///
 /// @brief Set the ID associated with a coroutine.
 ///
-/// @param coro A pointer to the coroutine whose ID is to be set.  If this value
-///   is NULL then the ID of the currently running coroutine will be set.
+/// @param coroutine A pointer to the coroutine whose ID is to be set.  If this
+///   value is NULL then the ID of the currently running coroutine will be set.
 /// @param id A 64-bit signed integer to set as the coroutine's ID.
 ///
 /// @return This function always returns coroutineSuccess.
-int coroutineSetId(Coroutine* coro, int64_t id) {
-  if (coro == NULL) {
-    coro = running;
+int coroutineSetId(Coroutine* coroutine, int64_t id) {
+  if (coroutine == NULL) {
+    coroutine = running;
     // running should always be non-NULL, so we shouldn't need to check again.
   }
-  coro->id = id;
+  coroutine->id = id;
 
   return coroutineSuccess;
 }
 
-/// @fn int64_t coroutineId(Coroutine* coro)
+/// @fn int64_t coroutineId(Coroutine* coroutine)
 ///
 /// @brief Get the ID associated with a coroutine.
 ///
-/// @param coro A pointer to the coroutine of interest.  If this value is NULL
-///   then the ID of the currently running coroutine will be returned.
+/// @param coroutine A pointer to the coroutine of interest.  If this value is
+///   NULL then the ID of the currently running coroutine will be returned.
 ///
 /// @return Returns the ID of the specified or current coroutine.  The ID
 /// returned will be COROUTINE_ID_NOT_SET if the ID of the coroutine has not
 /// been previously set with a call to coroutineSetId.
-int64_t coroutineId(Coroutine* coro) {
-  if (coro == NULL) {
-    coro = running;
+int64_t coroutineId(Coroutine* coroutine) {
+  if (coroutine == NULL) {
+    coroutine = running;
     // running should always be non-NULL, so we shouldn't need to check again.
   }
 
-  return coro->id;
+  return coroutine->id;
+}
+
+/// @fn CoroutineState coroutineState(Coroutine* coroutine)
+///
+/// @brief Get the state of a specified coroutine.
+///
+/// @param coroutine The Coroutine to examine.
+///
+/// @return Returns the state of the coroutine on success, NOT_RUNNING if the
+/// provided pointer is NULL.
+CoroutineState coroutineState(Coroutine* coroutine) {
+  CoroutineState state = NOT_RUNNING;
+
+  if (coroutine != NULL) {
+    state = coroutine->state;
+  }
+
+  return state;
 }
 
 /// @fn int comutexInit(Comutex* mtx, int type)

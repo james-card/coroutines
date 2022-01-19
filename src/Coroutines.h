@@ -94,42 +94,39 @@ extern "C"
 /// This is the initial value just after the coroutine constructor completes.
 #define COROUTINE_ID_NOT_SET ((int64_t) 0x8000000000000000)
 
+/// @enum CoroutineState
+///
+/// @brief States that a Coroutine can be in.
+typedef enum CoroutineState {
+  NOT_RUNNING,
+  RUNNING,
+  BLOCKED,
+  NUM_COROUTINE_STATES
+} CoroutineState;
+
 /// @struct Coroutine
 ///
 /// @brief Data structure to manage an individual coroutine.
 ///
 /// @param next Pointer to the next Coroutine on the list.
-/// @param state The jmp_buf to hold the context of the coroutine.
+/// @param context The jmp_buf to hold the context of the coroutine.
 /// @param id The ID of the coroutine.
+/// @param state The state of the coroutine.  (See enum above.)
 typedef struct Coroutine {
   struct Coroutine *next;
-  jmp_buf state;
+  jmp_buf context;
   int64_t id;
+  CoroutineState state;
 } Coroutine;
-
-/// @union FuncData
-///
-/// @brief Translation between a function pointer and a data pointer.
-///
-/// @details Due to the way this library works, we sometimes need to pass and
-/// return function pointers to our yield and resume functions, which take and
-/// return data pointers.  ISO C doesn't permit casting between these two, so
-/// we use a union to do the conversion.
-///
-/// @param func The function pointer portion of the pointer value.
-/// @param data The data pointer portion of the pointer value.
-typedef union FuncData {
-  void* (*func)(void*);
-  void *data;
-} FuncData;
 
 // Coroutine function prototypes.  Doxygen inline in source file.
 Coroutine* coroutineCreate(void* func(void *arg));
-bool coroutineResumable(Coroutine *coro);
+bool coroutineResumable(Coroutine *coroutine);
 void* coroutineResume(Coroutine *targetCoroutine, void *arg);
 void* coroutineYield(void *arg);
-int coroutineSetId(Coroutine* coro, int64_t id);
-int64_t coroutineId(Coroutine* coro);
+int coroutineSetId(Coroutine* coroutine, int64_t id);
+int64_t coroutineId(Coroutine* coroutine);
+CoroutineState coroutineState(Coroutine* coroutine);
 
 
 // Coroutine mutex support.
