@@ -90,19 +90,6 @@ static Coroutine *running = &first;
 /// a new idle coroutine.
 static Coroutine *idle = NULL;
 
-/// @fn bool coroutineResumable(Coroutine *coroutine)
-///
-/// @brief Examines a coroutine to determine whether or not it can be resumed.
-/// A coroutine can be resumed if it is not on the running or idle lists.
-///
-/// @param coroutine A pointer to the Coroutine to examine.
-///
-/// @return Returns false when the coroutine has run to completion or when it is
-/// blocked inside coroutineResume().
-bool coroutineResumable(Coroutine *coroutine) {
-  return ((coroutine != NULL) && (coroutine->next == NULL));
-}
-
 /// @fn void coroutinePush(Coroutine **list, Coroutine *coroutine)
 ///
 /// @brief Add a coroutine to a list and get the previous head of the list.
@@ -218,9 +205,9 @@ void* coroutineYield(void *arg) {
 
   if (running != &first) {
     Coroutine *currentCoroutine = coroutinePop(&running);
-    currentCoroutine->state = BLOCKED;
+    currentCoroutine->state = COROUTINE_STATE_BLOCKED;
     void *callingCoroutineArgument = coroutinePass(currentCoroutine, arg);
-    currentCoroutine->state = RUNNING;
+    currentCoroutine->state = COROUTINE_STATE_RUNNING;
     returnValue = callingCoroutineArgument;
   } // else, can't yield from the first coroutine.  Return NULL in this case.
 
@@ -349,7 +336,7 @@ void coroutineMain(void *ret) {
     // next iteration of the constructor.
     Coroutine *currentCoroutine = coroutinePop(&running);
     currentCoroutine->id = COROUTINE_ID_NOT_SET;
-    currentCoroutine->state = NOT_RUNNING;
+    currentCoroutine->state = COROUTINE_STATE_NOT_RUNNING;
     coroutinePush(&idle, currentCoroutine);
 
     // Block until we're called from the constructor again.
@@ -416,7 +403,7 @@ int64_t coroutineId(Coroutine* coroutine) {
 /// @return Returns the state of the coroutine on success, NOT_RUNNING if the
 /// provided pointer is NULL.
 CoroutineState coroutineState(Coroutine* coroutine) {
-  CoroutineState state = NOT_RUNNING;
+  CoroutineState state = COROUTINE_STATE_NOT_RUNNING;
 
   if (coroutine != NULL) {
     state = coroutine->state;

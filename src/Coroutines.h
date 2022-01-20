@@ -98,9 +98,9 @@ extern "C"
 ///
 /// @brief States that a Coroutine can be in.
 typedef enum CoroutineState {
-  NOT_RUNNING,
-  RUNNING,
-  BLOCKED,
+  COROUTINE_STATE_NOT_RUNNING,
+  COROUTINE_STATE_RUNNING,
+  COROUTINE_STATE_BLOCKED,
   NUM_COROUTINE_STATES
 } CoroutineState;
 
@@ -119,9 +119,32 @@ typedef struct Coroutine {
   CoroutineState state;
 } Coroutine;
 
+/// @def coroutineResumable(coroutinePointer)
+///
+/// @brief Examines a coroutine to determine whether or not it can be resumed.
+/// A coroutine can be resumed if it is not on the running or idle lists.
+///
+/// @param coroutinePointer A pointer to the Coroutine to examine.
+///
+/// @return Returns false when the coroutine has run to completion or when it is
+/// blocked inside coroutineResume() and true otherwise.
+#define coroutineResumable(coroutinePointer) \
+  ((coroutinePointer != NULL) && (coroutinePointer->next == NULL))
+
+/// @def coroutineFinished(coroutinePointer)
+///
+/// @brief Examines a coroutine to determine whether or not it has completed.
+///
+/// @param coroutinePointer A pointer to the Coroutine to examine.
+///
+/// @return Returns true when the coroutine is allocated and its state
+/// indicates that it's no longer running.
+#define coroutineFinished(coroutinePointer) \
+  ((coroutinePointer != NULL) \
+    && (coroutinePointer->state == COROUTINE_STATE_NOT_RUNNING))
+
 // Coroutine function prototypes.  Doxygen inline in source file.
 Coroutine* coroutineCreate(void* func(void *arg));
-bool coroutineResumable(Coroutine *coroutine);
 void* coroutineResume(Coroutine *targetCoroutine, void *arg);
 void* coroutineYield(void *arg);
 int coroutineSetId(Coroutine* coroutine, int64_t id);
