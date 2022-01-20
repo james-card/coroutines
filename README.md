@@ -8,6 +8,7 @@ This is a C coroutines library based on the work of [Tony Finch](http://www.dota
 * Added Doxygen comments.
 * Added clarifying comments in some of the less-intuitive code.
 * Provided a work-around for a bug in MSVC's 64-bit version of longjmp.
+* Renamed previous "state" memeber of the coroutine object to "context" and added a CoroutineState to track the running state of the coroutine.
 
 # Example Usage
 Example of a simple set of routines in a round robin scheduler.  This configuration will have each function update the passed in value twice before releasing the mutex that gates operation.
