@@ -30,6 +30,16 @@
 
 #include "Coroutines.h"
 
+#if !defined(__STDC_NO_THREADS__) && !defined(SINGLE_CORE_COROUTINES) \
+  && !defined(THREADSAFE_COROUTINES)
+#define THREADSAFE_COROUTINES
+#endif
+
+#ifdef THREADSAFE_COROUTINES
+#include "CThreads.h"
+#include <stdio.h> // For error messages
+#endif
+
 // Prototype forward declarations for mutual recursion.
 void coroutineStart(void);
 void coroutineMain(void*);
@@ -64,10 +74,13 @@ typedef union FuncData {
     void* data;
 } FuncData;
 
-/// @var static Coroutine first
+#ifndef THREADSAFE_COROUTINES
+// Use statically-allocated global variables wihtout threading.
+
+/// @var static Coroutine _first
 ///
 /// @brief Library-private first (main) routine.
-ZEROINIT(static Coroutine first);
+ZEROINIT(static Coroutine _first);
 
 /// @var static Coroutine *running
 ///
@@ -78,7 +91,7 @@ ZEROINIT(static Coroutine first);
 /// holds the context for the process's initial stack and also ensures that all
 /// externally-visible list elements have non-NULL next pointers.  (The "first"
 /// coroutine isn't exposed to the caller.)
-static Coroutine *running = &first;
+static Coroutine *running = &_first;
 
 /// @var static Coroutine *idle
 ///
@@ -98,11 +111,11 @@ static Coroutine *idle = NULL;
 /// @param coroutine A pointer to the Coroutine to push onto the list.
 ///
 /// @param Returns the previous head of the list.
-void coroutinePush(Coroutine **list, Coroutine *coroutine) {
-  if ((list != NULL) && (coroutine != NULL)) {
-    coroutine->next = *list;
-    *list = coroutine;
-  }
+void coroutinePush(Coroutine** list, Coroutine* coroutine) {
+    if ((list != NULL) && (coroutine != NULL)) {
+        coroutine->next = *list;
+        *list = coroutine;
+    }
 }
 
 /// @fn Coroutine* coroutinePop(Coroutine **list)
@@ -112,22 +125,150 @@ void coroutinePush(Coroutine **list, Coroutine *coroutine) {
 /// @param list The Coroutine list to pop from.
 ///
 /// @return Returns a pointer to the previous head of the list.
-Coroutine* coroutinePop(Coroutine **list) {
-  Coroutine *coroutine = NULL;
+Coroutine* coroutinePop(Coroutine** list) {
+    Coroutine* coroutine = NULL;
 
-  if (list != NULL) {
-    coroutine = *list;
-    *list = coroutine->next;
-    coroutine->next = NULL;
-  }
+    if (list != NULL) {
+        coroutine = *list;
+        *list = coroutine->next;
+        coroutine->next = NULL;
+    }
 
-  return coroutine;
+    return coroutine;
 }
 
 /// @var static void* saved
 ///
 /// @brief Value to be passed between contexts by the coroutinePass() function.
 static void* saved = NULL;
+
+#else // THREADSAFE_COROUTINES
+// Use dynamic memory and C threads mechanisms.
+
+/// @var static tss_t _first
+///
+/// @brief Thread-specific first (main) routine.
+ZEROINIT(static tss_t _first);
+
+/// @var static tss_t _running
+///
+/// @brief Thread-specific head of the running list.
+///
+/// @details The coroutine at the head of the running LIFO list has the CPU, and
+/// all others are suspended inside coroutineResume(). The "first" coro object
+/// holds the context for the process's initial stack and also ensures that all
+/// externally-visible list elements have non-NULL next pointers.  (The "first"
+/// coroutine isn't exposed to the caller.)
+ZEROINIT(static tss_t _running);
+
+/// @var static tss_t idle
+///
+/// @brief Thread-specific head of the idle list.
+///
+/// @details The idle LIFO list contains coroutines that are suspended in
+/// coroutineMain() and available to be associated with a new function. After
+/// initialization it is never NULL except briefly while coroutineMain() forks
+/// a new idle coroutine.
+ZEROINIT(static tss_t _idle);
+
+/// @var static tss_t saved
+///
+/// @brief Value to be passed between contexts by the coroutinePass() function.
+ZEROINIT(static tss_t saved);
+
+/// @var static once_flag _threadMetadataSetup
+///
+/// @brief once_flag to make sure we only initialize the thread-specific storage
+/// once.
+static once_flag _threadMetadataSetup = ONCE_FLAG_INIT;
+
+/// @fn void coroutineSetupThreadMetadata(void)
+///
+/// @brief Setup and initialize the thread-specefic storage needed for this
+/// library.
+///
+/// @return This function returns no value.
+void coroutineSetupThreadMetadata(void) {
+  // _first is the only Coroutine node that will be allocated with dynamic
+  // memory, so it's the only one that needs a destructor.  All the other
+  // nodes on the _running and _idle lists will be on the stack and do not
+  // need destructors.
+  int status = tss_create(&_first, free);
+  if (status != thrd_success) {
+    fprintf(stderr, "Could not initialize _first.\n");
+  }
+  status = tss_create(&_running, NULL);
+  if (status != thrd_success) {
+    fprintf(stderr, "Could not initialize _running.\n");
+  }
+  status = tss_create(&_idle, NULL);
+  if (status != thrd_success) {
+    fprintf(stderr, "Could not initialize _idle.\n");
+  }
+  status = tss_create(&saved, NULL);
+  if (status != thrd_success) {
+    fprintf(stderr, "Could not initialize saved.\n");
+  }
+
+  Coroutine* first = (Coroutine*) calloc(1, sizeof(Coroutine));
+  if (first == NULL) {
+    fputs("Could not allocate first pointer in coroutineSetupThreadMetadata.\n",
+      stderr);
+  }
+  status = tss_set(_first, first);
+  if (status != thrd_success) {
+    fprintf(stderr, "Could not set _first to first.\n");
+  }
+  status = tss_set(_running, first);
+  if (status != thrd_success) {
+    fprintf(stderr, "Could not set _running to first.\n");
+  }
+  // This *shouldn't* be necessary, but why assume when we can be certain?
+  status = tss_set(_idle, NULL);
+  if (status != thrd_success) {
+    fprintf(stderr, "Could not set _idle to NULL.\n");
+  }
+  status = tss_set(saved, NULL);
+  if (status != thrd_success) {
+    fprintf(stderr, "Could not set saved to NULL.\n");
+  }
+}
+
+/// @fn void coroutinePush(tss_t* list, Coroutine *coroutine)
+///
+/// @brief Add a coroutine to a list and get the previous head of the list.
+///
+/// @param list The Coroutine list to push onto.
+/// @param coroutine A pointer to the Coroutine to push onto the list.
+///
+/// @param Returns the previous head of the list.
+void coroutinePush(tss_t* list, Coroutine* coroutine) {
+  if ((list != NULL) && (coroutine != NULL)) {
+    coroutine->next = (Coroutine*) tss_get(*list);
+    tss_set(*list, coroutine);
+  }
+}
+
+/// @fn Coroutine* coroutinePop(tss_t* list)
+///
+/// @brief Remove a coroutine from a list and return it.
+///
+/// @param list The Coroutine list to pop from.
+///
+/// @return Returns a pointer to the previous head of the list.
+Coroutine* coroutinePop(tss_t* list) {
+  Coroutine* coroutine = NULL;
+
+  if (list != NULL) {
+    coroutine = (Coroutine*) tss_get(*list);
+    tss_set(*list, coroutine->next);
+    coroutine->next = NULL;
+  }
+
+  return coroutine;
+}
+
+#endif
 
 /// @fn void* coroutinePass(Coroutine currentCoroutine, void *arg)
 ///
@@ -140,10 +281,18 @@ static void* saved = NULL;
 /// @return Returns the target's returned or yielded value.
 void* coroutinePass(Coroutine *currentCoroutine, void *arg) {
   if (currentCoroutine != NULL) {
+#ifdef THREADSAFE_COROUTINES
+    tss_set(saved, arg);
+#else
     saved = arg;
+#endif
 
     if (!setjmp(currentCoroutine->context)) {
+#ifdef THREADSAFE_COROUTINES
+      Coroutine* targetCoroutine = (Coroutine*) tss_get(_running);
+#else
       Coroutine *targetCoroutine = running;
+#endif
 #if defined(_MSC_VER) && defined(_M_X64)
       // This should *NOT* be necessary.  The intent of longjmp is to restore
       // the context of the registers captured at setjmp, however the MSVC x64
@@ -157,10 +306,18 @@ void* coroutinePass(Coroutine *currentCoroutine, void *arg) {
       longjmp(targetCoroutine->context, 1);
     }
   } else {
+#ifdef THREADSAFE_COROUTINES
+    tss_set(saved, NULL);
+#else
     saved = NULL;
+#endif
   }
 
+#ifdef THREADSAFE_COROUTINES
+  return tss_get(saved);
+#else
   return saved;
+#endif
 }
 
 /// @fn void* coroutineResume(Coroutine *targetCoroutine, void *arg)
@@ -178,9 +335,18 @@ void* coroutinePass(Coroutine *currentCoroutine, void *arg) {
 ///   has run to completion.  If the coroutine is not resumable, returns the
 ///   special value COROUTINE_NOT_RESUMABLE.
 void* coroutineResume(Coroutine *targetCoroutine, void *arg) {
+#ifdef THREADSAFE_COROUTINES
+  call_once(&_threadMetadataSetup, coroutineSetupThreadMetadata);
+#endif
+
   if (coroutineResumable(targetCoroutine)) {
+#ifdef THREADSAFE_COROUTINES
+    Coroutine* currentCoroutine = (Coroutine*) tss_get(_running);
+    coroutinePush(&_running, targetCoroutine);
+#else
     Coroutine *currentCoroutine = running;
     coroutinePush(&running, targetCoroutine);
+#endif
     // The target coroutine is now at the head of the running list as is
     // expected by coroutinePass().
     void *calledCoroutineReturn = coroutinePass(currentCoroutine, arg);
@@ -202,9 +368,20 @@ void* coroutineResume(Coroutine *targetCoroutine, void *arg) {
 /// for this coroutine.
 void* coroutineYield(void *arg) {
   void *returnValue = NULL;
+#ifdef THREADSAFE_COROUTINES
+  call_once(&_threadMetadataSetup, coroutineSetupThreadMetadata);
+  Coroutine* first = (Coroutine*) tss_get(_first);
+#else
+  Coroutine* first = &_first;
+#endif
 
-  if (running != &first) {
+#ifdef THREADSAFE_COROUTINES
+  if (((Coroutine*) tss_get(_running)) != first) {
+    Coroutine* currentCoroutine = coroutinePop(&_running);
+#else
+  if (running != first) {
     Coroutine *currentCoroutine = coroutinePop(&running);
+#endif
     currentCoroutine->state = COROUTINE_STATE_BLOCKED;
     void *callingCoroutineArgument = coroutinePass(currentCoroutine, arg);
     currentCoroutine->state = COROUTINE_STATE_RUNNING;
@@ -242,6 +419,11 @@ Coroutine* coroutineCreate(void* func(void *arg)) {
     return NULL;
   }
 
+#ifdef THREADSAFE_COROUTINES
+  call_once(&_threadMetadataSetup, coroutineSetupThreadMetadata);
+  Coroutine* idle = (Coroutine*) tss_get(_idle);
+  Coroutine* running = (Coroutine*) tss_get(_running);
+#endif
   // The current coroutine is at the head of the running list.
   if ((idle == NULL) && (!setjmp(running->context))) {
     // We've just been called from the calling function and need to create a
@@ -253,7 +435,11 @@ Coroutine* coroutineCreate(void* func(void *arg)) {
   // instance we want to use is now at the head of the idle list.
 
   // The head of the idle list has the Coroutine allocated in coroutineMain.
+#ifdef THREADSAFE_COROUTINES
+  Coroutine* newCoroutine = coroutinePop(&_idle);
+#else
   Coroutine *newCoroutine = coroutinePop(&idle);
+#endif
 
   // The head of the running list is the current coroutine.
   newCoroutine = (Coroutine*) coroutineResume(newCoroutine, funcData.data);
@@ -290,7 +476,11 @@ Coroutine* coroutineCreate(void* func(void *arg)) {
 void coroutineMain(void *ret) {
   ZEROINIT(Coroutine me);
   me.id = COROUTINE_ID_NOT_SET;
+#ifdef THREADSAFE_COROUTINES
+  coroutinePush(&_idle, &me);
+#else
   coroutinePush(&idle, &me);
+#endif
 
   // The target of coroutinePass() (the caller) is at the head of the running
   // list.  The return point for that Coroutine was either set in the setjmp
@@ -314,6 +504,9 @@ void coroutineMain(void *ret) {
   // we're about to set is for ourself.  The call to coroutineStart here will
   // allocate the next Coroutine on the idle list to be used in the next call
   // to the constructor.
+#ifdef THREADSAFE_COROUTINES
+  Coroutine* running = (Coroutine*) tss_get(_running);
+#endif
   if (!setjmp(running->context)) {
     coroutineStart();
   }
@@ -334,10 +527,14 @@ void coroutineMain(void *ret) {
 
     // Deallocate the currently running coroutine and make it available to the
     // next iteration of the constructor.
-    Coroutine *currentCoroutine = coroutinePop(&running);
+    Coroutine *currentCoroutine = coroutinePop(&_running);
     currentCoroutine->id = COROUTINE_ID_NOT_SET;
     currentCoroutine->state = COROUTINE_STATE_NOT_RUNNING;
+#ifdef THREADSAFE_COROUTINES
+    coroutinePush(&_idle, currentCoroutine);
+#else
     coroutinePush(&idle, currentCoroutine);
+#endif
 
     // Block until we're called from the constructor again.
     funcData.data = coroutinePass(&me, ret);
@@ -367,7 +564,12 @@ void coroutineStart(void) {
 /// @return This function always returns coroutineSuccess.
 int coroutineSetId(Coroutine* coroutine, int64_t id) {
   if (coroutine == NULL) {
+#ifdef THREADSAFE_COROUTINES
+    call_once(&_threadMetadataSetup, coroutineSetupThreadMetadata);
+    coroutine = (Coroutine*) tss_get(_running);
+#else
     coroutine = running;
+#endif
     // running should always be non-NULL, so we shouldn't need to check again.
   }
   coroutine->id = id;
@@ -387,7 +589,12 @@ int coroutineSetId(Coroutine* coroutine, int64_t id) {
 /// been previously set with a call to coroutineSetId.
 int64_t coroutineId(Coroutine* coroutine) {
   if (coroutine == NULL) {
+#ifdef THREADSAFE_COROUTINES
+    call_once(&_threadMetadataSetup, coroutineSetupThreadMetadata);
+    coroutine = (Coroutine*) tss_get(_running);
+#else
     coroutine = running;
+#endif
     // running should always be non-NULL, so we shouldn't need to check again.
   }
 
@@ -478,6 +685,10 @@ int comutexLock(Comutex *mtx) {
 int comutexUnlock(Comutex *mtx) {
   int returnValue = coroutineSuccess;
 
+#ifdef THREADSAFE_COROUTINES
+  call_once(&_threadMetadataSetup, coroutineSetupThreadMetadata);
+  Coroutine* running = (Coroutine*) tss_get(_running);
+#endif
   if ((mtx != NULL) && (mtx->coroutine == running)) {
     mtx->recursionLevel--;
     if (mtx->recursionLevel == 0) {
@@ -575,6 +786,10 @@ int comutexTrylock(Comutex *mtx) {
 
   int returnValue = coroutineError;
 
+#ifdef THREADSAFE_COROUTINES
+  call_once(&_threadMetadataSetup, coroutineSetupThreadMetadata);
+  Coroutine* running = (Coroutine*) tss_get(_running);
+#endif
   if (mtx->coroutine == NULL) {
     mtx->coroutine = running;
     mtx->recursionLevel = 1;
