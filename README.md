@@ -18,4 +18,27 @@ An example of a simple set of coroutines in a round robin scheduler can be found
 * With thread safety running in a single thread
 * With thread safety running in multiple threads
 
+The output of the program is a good example of branch prediction.  The iterations get faster the longer the program runs (up to a point).  I had to throw away the results of the first run because of this.
+
+# Performance Differences
 The difference in performance between with and without thread safety is due to thread-safe coroutines having to make use of thread-specific storage rather than global variables.  The difference in performance between a single thread and multiple threads is due to resource contention among threads on the thread-specific storage lookups.
+
+## Performance Differences as Measured in WSL
+Windows Subsystem Linux uses pthreads for the thread-specific storage mechanisms.  There is a small overhead introduced by the ISO C threads wrapper I put around them in my cthreads library.
+```
+Scheduled tasks completed in 2.569028 seconds without threading.
+Scheduled tasks completed in 2.588351 seconds with threading.
+* 100.75% of non-threading baseline.
+Scheduled tasks completed in an average of 7.599144 seconds with multithreading.
+* 293.59% of threading baseline.
+```
+
+## Performance Differences as Measured in Windows Release Build
+Visual Studio does not support ISO C threads and has very different mechanisms than pthreads for most things.  I implemented an ISO C threads library to get equivalent functionality.  The biggest difference between Windows and the ISO C threads standard is how thread-specific storage is supposed to work, which the coroutines library makes heavy use of.  In my implementation, I use red-black trees for the lookup mechanism, which may be suboptimal relative to whatever the implementation in pthreads is.
+```
+Scheduled tasks completed in 1.151290 seconds without threading.
+Scheduled tasks completed in 1.347941 seconds with threading.
+* 117.08% of non-threading baseline.
+Scheduled tasks completed in an average of 4.444585 seconds with multithreading.
+* 329.73% of threading baseline.
+```
