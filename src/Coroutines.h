@@ -55,6 +55,10 @@ extern "C"
 #include <time.h>
 #include <stdint.h>
 
+#if !defined(SINGLE_CORE_COROUTINES) && !defined(THREADSAFE_COROUTINES)
+#define THREADSAFE_COROUTINES
+#endif
+
 // Base coroutine support.
 
 // Coroutine status values.
@@ -112,11 +116,16 @@ typedef enum CoroutineState {
 /// @param context The jmp_buf to hold the context of the coroutine.
 /// @param id The ID of the coroutine.
 /// @param state The state of the coroutine.  (See enum above.)
+/// @param nextToSignal The next coroutine to signal when waiting on a signal.
+/// @param prevToSignal The previous coroutine to signal when waiting on a
+///   signal.
 typedef struct Coroutine {
   struct Coroutine *next;
   jmp_buf context;
   int64_t id;
   CoroutineState state;
+  struct Coroutine *nextToSignal;
+  struct Coroutine *prevToSignal;
 } Coroutine;
 
 /// @def coroutineResumable(coroutinePointer)
@@ -150,6 +159,8 @@ void* coroutineYield(void *arg);
 int coroutineSetId(Coroutine* coroutine, int64_t id);
 int64_t coroutineId(Coroutine* coroutine);
 CoroutineState coroutineState(Coroutine* coroutine);
+void coroutineSetThreadingSupportEnabled(bool state);
+bool coroutineThreadingSupportEnabled();
 
 
 // Coroutine mutex support.
@@ -201,10 +212,15 @@ void* comutexLastYieldValue(Comutex *mtx);
 ///   condition.
 /// @param numSignal The number of signals emitted for unblocking waiting
 ///   coroutines.
+/// @param head The head of the coroutine queue (the next coroutine to signal).
+/// @param tail The tail of the coroutine queue (where the next waiting
+///   coroutine will be added).
 typedef struct Cocondition {
   void *lastYieldValue;
   int numWaiters;
   int numSignals;
+  Coroutine *head;
+  Coroutine *tail;
 } Cocondition;
 
 // Coroutine condition function prototypes.  Doxygen inline in source file.
