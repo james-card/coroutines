@@ -17,4 +17,5 @@ An example of a simple set of coroutines in a round robin scheduler can be found
 * Without thread safety
 * With thread safety running in a single thread
 * With thread safety running in multiple threads
+
 The difference in performance between with and without thread safety is due to thread-safe coroutines having to make use of thread-specific storage rather than global variables.  The difference in performance between a single thread and multiple threads is due to resource contention among threads on the thread-specific storage lookups.
