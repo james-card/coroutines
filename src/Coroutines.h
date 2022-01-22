@@ -159,8 +159,10 @@ void* coroutineYield(void *arg);
 int coroutineSetId(Coroutine* coroutine, int64_t id);
 int64_t coroutineId(Coroutine* coroutine);
 CoroutineState coroutineState(Coroutine* coroutine);
+#ifdef THREADSAFE_COROUTINES
 void coroutineSetThreadingSupportEnabled(bool state);
 bool coroutineThreadingSupportEnabled();
+#endif
 
 
 // Coroutine mutex support.
