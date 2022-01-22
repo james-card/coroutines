@@ -10,7 +10,7 @@ This is a C coroutines library based on the work of [Tony Finch](http://www.dota
 * Provided a work-around for a bug in MSVC's 64-bit version of longjmp.
 * Renamed previous "state" memeber of the coroutine object to "context" and added a CoroutineState to track the running state of the coroutine.
 * Added thread safety to the libraries that is compile-time enabled but runtime-disabled by default.
- * Compile-time enablement can be disable by setting the `SINGLE_CORE_COROUTINES` define at compile time.
+  * Compile-time enablement can be disable by setting the `SINGLE_CORE_COROUTINES` define at compile time.
 
 # Example Usage
 An example of a simple set of coroutines in a round robin scheduler can be found in the examples directory.  This configuration will have each coroutine update the common integer twice before releasing the mutex that gates operation.  The example program provides metrics of performance for coroutines:
