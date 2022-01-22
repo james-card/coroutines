@@ -1,0 +1,12 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/git-commands/git-subrepo#readme
+;
+[subrepo]
+	remote = git@github.com:james-card/cthreads.git
+	branch = main
+	commit = ef8d5068031b8d2db3f5b4c2f7062bbbefe1c2b6
+	parent = 29fc86144e33317f006eca28d5dc33b7d738beec
+	method = merge
+	cmdver = 0.4.3
