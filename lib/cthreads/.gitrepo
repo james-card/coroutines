@@ -6,7 +6,7 @@
 [subrepo]
 	remote = git@github.com:james-card/cthreads.git
 	branch = main
-	commit = ef8d5068031b8d2db3f5b4c2f7062bbbefe1c2b6
-	parent = 29fc86144e33317f006eca28d5dc33b7d738beec
+	commit = 389aedd222242e8fc4e083f91e9fc12bfa8277d2
+	parent = 20e26565841e7b19a82223b48a7e05231cde79ac
 	method = merge
 	cmdver = 0.4.3
