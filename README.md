@@ -12,6 +12,8 @@ This is a C coroutines library based on the work of [Tony Finch](http://www.dota
 * Added thread safety to the libraries that is compile-time enabled but runtime-disabled by default.
   * Compile-time enablement can be disable by setting the `SINGLE_CORE_COROUTINES` define at compile time.
 
+Really, coroutines are best suited for embedded systems, not modern processes.  This implementation is provided for anyone who is looking for a full-featured C coroutines library.
+
 # Example Usage
 An example of a simple set of coroutines in a round robin scheduler can be found in the examples directory.  This configuration will have each coroutine update the common integer twice before releasing the mutex that gates operation.  The example program provides metrics of performance for coroutines:
 * Without thread safety
@@ -42,3 +44,6 @@ Scheduled tasks completed in 1.347941 seconds with threading.
 Scheduled tasks completed in an average of 4.444585 seconds with multithreading.
 * 329.73% of threading baseline.
 ```
+
+# Debugging
+Good luck!  Coroutines wreak havoc with valgrind.  It will complain about uninitialized values all over the place.  I assure you that it's wrong in all the areas I've looked into.  Visual Studio isn't terribly happy about them either.  The Visual Studio debugger does, however, update its stack correctly after a context switch, so it may be a better choice for debugging simple things than Linux/valgrind.
