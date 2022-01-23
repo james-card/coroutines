@@ -65,8 +65,8 @@ void coroutineMain(void*);
 /// @param func The function pointer portion of the pointer value.
 /// @param data The data pointer portion of the pointer value.
 typedef union FuncData {
-    void* (*func)(void*);
-    void* data;
+  void* (*func)(void*);
+  void* data;
 } FuncData;
 
 // Use statically-allocated global variables for use wihtout threading.
