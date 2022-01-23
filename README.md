@@ -2,6 +2,7 @@
 This is a C coroutines library based on the work of [Tony Finch](http://www.dotat.at/cgi/git/picoro.git).  It aims to provide a full-featured set of functionality for coroutines in pure C (no inline assembly or dependencies on any external libraries).  Relative to what Tony originally wrote, the changes and extensions are as follows:
 * Removed use of assert.  Functions now check for invalid parameters and have special return values for errors.
 * Fixed non-ISO C compliant passing of function pointers as parameters to calls that take void pointers.
+* Made `COROUTINE_STACK_SIZE` a compile-time define that defaults to 16 KB.
 * Added ID property to coroutine object and accompanying setter/getter.
 * Added coroutine mutexes.
 * Added coroutine conditions.
