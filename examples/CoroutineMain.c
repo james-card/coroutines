@@ -76,13 +76,12 @@ typedef struct CoroutineArgs {
 /// NULL on completion.
 void* routine(void *args) {
   CoroutineArgs *coroutineArgs = (CoroutineArgs*) args;
-  int functionNumber = coroutineArgs->functionNumber;
   int *globalInt = coroutineArgs->globalInt;
   Comutex *comutex = coroutineArgs->comutex;
   Cocondition *cocondition = coroutineArgs->cocondition;
   int *coroutineStorage = coroutineArgs->coroutineStorage;
+  int functionNumber = coroutineStorage[coroutineId(NULL)];
   bool mutexLocked = false;
-  coroutineStorage[coroutineId(NULL)] = functionNumber;
 
   comutexLock(comutex);
   coconditionWait(cocondition, comutex);
@@ -212,7 +211,8 @@ int loadAndRunCoroutines(void *args) {
 #endif
 
   Coroutine *coroutineArray[NUM_COROUTINES];
-  int coroutineStorage[NUM_COROUTINES] = {0};
+  // Assign the instances function numbers.
+  int coroutineStorage[NUM_COROUTINES] = {1, 2, 3};
 
   Comutex comutex;
   if (comutexInit(&comutex, comutexPlain) != coroutineSuccess) {
@@ -232,35 +232,16 @@ int loadAndRunCoroutines(void *args) {
   coroutineArgs.globalInt = &globalInt;
   coroutineArgs.coroutineStorage = coroutineStorage;
 
-  // Instantiate and initialize coroutine 1.
-  coroutineArray[0] = coroutineCreate(routine);
-  if (coroutineArray[0] == NULL) {
-    fprintf(stderr, "Could not initialize coroutine 0.\n");
-    return 1;
+  // Instantiate and initialize the coroutines.
+  for (int i = 0; i < NUM_COROUTINES; i++) {
+    coroutineArray[i] = coroutineCreate(routine);
+    if (coroutineArray[i] == NULL) {
+      fprintf(stderr, "Could not initialize coroutine %d.\n", i);
+      return 1;
+    }
+    coroutineSetId(coroutineArray[i], i);
+    coroutineResume(coroutineArray[i], &coroutineArgs);
   }
-  coroutineSetId(coroutineArray[0], 0);
-  coroutineArgs.functionNumber = 1;
-  coroutineResume(coroutineArray[0], &coroutineArgs);
-
-  // Instantiate and initialize coroutine 2.
-  coroutineArray[1] = coroutineCreate(routine);
-  if (coroutineArray[1] == NULL) {
-    fprintf(stderr, "Could not initialize coroutine 1.\n");
-    return 1;
-  }
-  coroutineSetId(coroutineArray[1], 1);
-  coroutineArgs.functionNumber = 2;
-  coroutineResume(coroutineArray[1], &coroutineArgs);
-
-  // Instantiate and initialize coroutine 3.
-  coroutineArray[2] = coroutineCreate(routine);
-  if (coroutineArray[2] == NULL) {
-    fprintf(stderr, "Could not initialize coroutine 2.\n");
-    return 1;
-  }
-  coroutineSetId(coroutineArray[2], 2);
-  coroutineArgs.functionNumber = 3;
-  coroutineResume(coroutineArray[2], &coroutineArgs);
 
   coconditionBroadcast(&cocondition);
 
