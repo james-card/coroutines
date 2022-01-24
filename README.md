@@ -4,6 +4,7 @@ This is a C coroutines library based on the work of [Tony Finch](http://www.dota
 * Fixed non-ISO C compliant passing of function pointers as parameters to calls that take void pointers.
 * Made `COROUTINE_STACK_SIZE` a compile-time define that defaults to 16 KB.
 * Added ID property to coroutine object and accompanying setter/getter.
+  * This is provided so that the coroutine can identify its place in an array of croutine-specific storage.
 * Added coroutine mutexes.
 * Added coroutine conditions.
 * Added Doxygen comments.
