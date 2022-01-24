@@ -1,5 +1,5 @@
 # Coroutines
-This is a C coroutines library based on the work of [Tony Finch](http://www.dotat.at/cgi/git/picoro.git).  It aims to provide a full-featured set of functionality for coroutines in pure C (no inline assembly or dependencies on any external libraries).  Relative to what Tony originally wrote, the changes and extensions are as follows:
+This is a C coroutines library based on the work of [Tony Finch](http://www.dotat.at/cgi/git/picoro.git).  This approach segments the main stack into sub-stacks for the coroutines.  This library aims to provide a full-featured set of functionality for coroutines in pure C (no assembly or dependencies on third-party libraries).  Relative to what Tony originally wrote, the changes and extensions are as follows:
 * Removed use of assert.  Functions now check for invalid parameters and have special return values for errors.
 * Fixed non-ISO C compliant passing of function pointers as parameters to calls that take void pointers.
 * Made `COROUTINE_STACK_SIZE` a compile-time define that defaults to 16 KB.
@@ -14,7 +14,7 @@ This is a C coroutines library based on the work of [Tony Finch](http://www.dota
   * Compile-time enablement can be disable by setting the `SINGLE_CORE_COROUTINES` define at compile time.
   * Disabling thread safety at compile time also eliminates the need for dynamic memory.
 
-Really, coroutines are best suited for embedded systems, not modern processes.  This implementation is provided for anyone who is looking for a full-featured C coroutines library.
+Really, coroutines are best suited for embedded systems, but this approach can be used within an individual process as well.  This implementation is provided for anyone who is looking for a full-featured C coroutines library.
 
 # Example Usage
 An example of a simple set of coroutines in a round robin scheduler can be found in the examples directory.  This configuration will have each coroutine update the common integer twice before releasing the mutex that gates operation.  The example program provides metrics of performance for coroutines:
@@ -48,4 +48,4 @@ Scheduled tasks completed in an average of 4.444585 seconds with multithreading.
 ```
 
 # Debugging
-Good luck!  Coroutines wreak havoc with valgrind.  It will complain about uninitialized values all over the place.  I assure you that it's wrong in all the areas I've looked into.  Visual Studio isn't terribly happy about them either.  The Visual Studio debugger does, however, update its stack correctly after a context switch, so it may be a better choice for debugging simple things than Linux/valgrind.
+Good luck!  Segmenting the stack wreaks havoc with valgrind.  It will complain about uninitialized values all over the place.  I assure you that it's wrong in all the areas I've looked into.  The Visual Studio debugger does, however, update its stack correctly after a context switch, so it may be a better choice for debugging simple things than Linux/valgrind.
