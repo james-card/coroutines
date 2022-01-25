@@ -12,8 +12,8 @@ This is a C coroutines library based on the work of [Tony Finch](http://www.dota
 * Added clarifying comments in some of the less-intuitive code.
 * Provided a work-around for a bug in MSVC's 64-bit version of longjmp.
 * Renamed previous "state" memeber of the coroutine object to "context" and added a CoroutineState to track the running state of the coroutine.
-* Added thread safety to the libraries that is compile-time enabled but runtime-disabled by default.
-  * Compile-time enablement can be disable by setting the `SINGLE_CORE_COROUTINES` define at compile time.
+* Added thread safety to the libraries that is compile-time supported but runtime-disabled by default.
+  * Compile-time support can be disabled by setting the `SINGLE_CORE_COROUTINES` define at compile time.
   * Disabling thread safety at compile time also eliminates the need for dynamic memory.
 
 Really, coroutines are best suited for embedded systems, but this approach can be used within an individual process as well.  This implementation is provided for anyone who is looking for a full-featured C coroutines library.
