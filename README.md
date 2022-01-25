@@ -3,7 +3,7 @@ This is a C coroutines library based on the work of [Tony Finch](http://www.dota
 * Removed use of assert.  Functions now check for invalid parameters and have special return values for errors.
 * Fixed non-ISO C compliant passing of function pointers as parameters to calls that take void pointers.
 * Made `COROUTINE_STACK_SIZE` a compile-time define that defaults to 16 KB.
-  * NOTE: This defines the stack size of the main routine (the function setting up the coroutines) as well.
+  * NOTE: This also defines the stack size of the main routine (the function setting up the coroutines).
 * Added ID property to coroutine object and accompanying setter/getter.
   * This is provided so that the coroutine can identify its place in an array of croutine-specific storage.
 * Added coroutine mutexes.
