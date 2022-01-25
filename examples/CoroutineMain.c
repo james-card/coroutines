@@ -37,8 +37,6 @@ uint64_t getElapsedMicroseconds(uint64_t previousTime) {
 ///   coroutines.
 /// @param cocondition A pointer to the Cocondition that will gate starting
 ///   execution of the coroutine.
-/// @param functionNumber The unique number that will identify this function in
-///   output statements.
 /// @param globalInt A pointer to the global integer that is updated by each
 ///   coroutine instance.
 /// @param coroutineStorage A pointer to an array of integers that represents
@@ -46,12 +44,11 @@ uint64_t getElapsedMicroseconds(uint64_t previousTime) {
 typedef struct CoroutineArgs {
   Comutex *comutex;
   Cocondition *cocondition;
-  int functionNumber;
   int *globalInt;
   int *coroutineStorage;
 } CoroutineArgs;
 
-/// @fn void* routine(void *args)
+/// @fn void* coroutine(void *args)
 ///
 /// @brief The template coroutine that will be executed in multiple instances
 /// by parent functions.
@@ -74,7 +71,7 @@ typedef struct CoroutineArgs {
 ///
 /// @param Yields a pointer to the shared globalInt during execution, returns
 /// NULL on completion.
-void* routine(void *args) {
+void* coroutine(void *args) {
   CoroutineArgs *coroutineArgs = (CoroutineArgs*) args;
   int *globalInt = coroutineArgs->globalInt;
   Comutex *comutex = coroutineArgs->comutex;
@@ -107,9 +104,11 @@ void* routine(void *args) {
     if (lastYieldValue != NULL) {
       // We've been passed new arguments.
       // We can't update comutex or cocondition without breaking things.
-      // Update our function number.
+      // Update our function number and globalInt.
       coroutineArgs = (CoroutineArgs*) lastYieldValue;
-      functionNumber = coroutineArgs->functionNumber;
+      coroutineStorage = coroutineArgs->coroutineStorage;
+      functionNumber = coroutineStorage[coroutineId(NULL)];
+      globalInt = coroutineArgs->globalInt;
     }
 
     (*globalInt)++;
@@ -234,7 +233,7 @@ int loadAndRunCoroutines(void *args) {
 
   // Instantiate and initialize the coroutines.
   for (int i = 0; i < NUM_COROUTINES; i++) {
-    coroutineArray[i] = coroutineCreate(routine);
+    coroutineArray[i] = coroutineCreate(coroutine);
     if (coroutineArray[i] == NULL) {
       fprintf(stderr, "Could not initialize coroutine %d.\n", i);
       return 1;
