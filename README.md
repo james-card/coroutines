@@ -39,7 +39,7 @@ Scheduled tasks completed in an average of 7.599144 seconds with multithreading.
 * 293.59% of threading baseline.
 ```
 
-## Performance Differences as Measured in Windows Release Build
+## Performance Differences as Measured in a Windows Release Build
 Visual Studio does not support ISO C threads and has very different mechanisms than pthreads for most things.  I implemented an ISO C threads library to get equivalent functionality.  The biggest difference between Windows and the ISO C threads standard is how thread-specific storage is supposed to work, which the coroutines library makes heavy use of.  In my implementation, I use red-black trees for the lookup mechanism, which may be suboptimal relative to whatever the implementation in pthreads is.
 ```
 Scheduled tasks completed in 1.151290 seconds without threading.
