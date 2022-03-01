@@ -126,6 +126,7 @@ typedef struct Coroutine {
   CoroutineState state;
   struct Coroutine *nextToSignal;
   struct Coroutine *prevToSignal;
+  jmp_buf resetContext;
 } Coroutine;
 
 /// @def coroutineResumable(coroutinePointer)
@@ -156,9 +157,9 @@ typedef struct Coroutine {
 Coroutine* coroutineCreate(void* func(void *arg));
 void* coroutineResume(Coroutine *targetCoroutine, void *arg);
 void* coroutineYield(void *arg);
-int coroutineSetId(Coroutine* coroutine, int64_t id);
-int64_t coroutineId(Coroutine* coroutine);
-CoroutineState coroutineState(Coroutine* coroutine);
+int coroutineSetId(Coroutine *coroutine, int64_t id);
+int64_t coroutineId(Coroutine *coroutine);
+CoroutineState coroutineState(Coroutine *coroutine);
 #ifdef THREADSAFE_COROUTINES
 void coroutineSetThreadingSupportEnabled(bool state);
 bool coroutineThreadingSupportEnabled();
@@ -235,6 +236,8 @@ int conditionTimedwait(Cocondition *cond, Comutex *mtx,
 int coconditionWait(Cocondition *cond, Comutex *mtx);
 void* coconditionLastYieldValue(Cocondition *cond);
 
+
+int coroutineKill(Coroutine *targetCoroutine, Comutex **mutexes);
 
 #ifdef __cplusplus
 } // extern "C"

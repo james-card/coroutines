@@ -35,6 +35,8 @@
 #include <stdio.h> // For error messages
 #endif
 
+#include <string.h>
+
 // Prototype forward declarations for mutual recursion.
 void coroutineStart(void);
 void coroutineMain(void*);
@@ -582,6 +584,21 @@ void coroutineMain(void *ret) {
   if (!setjmp(running->context)) {
     coroutineStart();
   }
+
+  if (setjmp(running->resetContext)) {
+    // When a coroutine is killed, its normal context is set to this position
+    // so that it can be restarted properly from the constructor.  We'll have to
+    // manually pull the data that was provided from coroutinePass since the
+    // constructor will be thinking that it just provided us with the function
+    // we should call.
+    funcData.data = _globalSaved;
+#ifdef THREADSAFE_COROUTINES
+    if (_coroutineThreadingSupportEnabled) {
+      funcData.data = tss_get(_tssSaved);
+    }
+#endif
+  }
+
   // We have just been passed execution from the coroutinePass() statement
   // above.  The stack is now configured and we're ready to begin execution.
   // We will first yield the Coroutine allocated above that the constructor is
@@ -625,6 +642,96 @@ void coroutineMain(void *ret) {
     funcData.data = coroutinePass(&me, ret);
     func = funcData.func;
   }
+}
+
+/// @fn int coroutineKill(Coroutine *targetCoroutine, Comutex **mutexes)
+///
+/// @brief Kill a coroutine that's currently in progresss.
+///
+/// @param targetCoroutine A pointer to the Coroutine to kill.
+/// @param mutextes A one-dimensional, NULL-terminated array of mutexes to check
+///   and unlock if they're locked by the Coroutine.
+///
+/// @note A Coroutine can only be blocked on a single Cocondition and the
+/// information for that Cocondition is contained in the Coroutine structure, so
+/// there's no need to pass in Coconditions to check.
+///
+/// @return Returns coroutineSuccess on success, coroutineError on error.
+int coroutineKill(Coroutine *targetCoroutine, Comutex **mutexes) {
+  if (targetCoroutine == NULL) {
+    return coroutineError;
+  }
+
+  if (targetCoroutine->state == COROUTINE_STATE_NOT_RUNNING) {
+    // It's not possible to take any action on this coroutine.  This is not an
+    // error condition because the desired state is achieved.
+    return coroutineSuccess;
+  }
+
+  // Remove the target coroutine from the running stack if applicable.
+  Coroutine* running = _globalRunning;
+#ifdef THREADSAFE_COROUTINES
+  if (_coroutineThreadingSupportEnabled) {
+    running = (Coroutine*)tss_get(_tssRunning);
+  }
+#endif
+  Coroutine* prev = NULL;
+  for (; running != NULL; running = running->next) {
+    if (running == targetCoroutine) {
+      if (prev != NULL) {
+        prev->next = targetCoroutine->next;
+      } else {
+        // The target coroutine is the top of the running stack.
+#ifdef THREADSAFE_COROUTINES
+        if (!_coroutineThreadingSupportEnabled) {
+          coroutineGlobalPop(&_globalRunning);
+        } else {
+          coroutineTssPop(&_tssRunning);
+        }
+#else
+        coroutineGlobalPop(&_globalRunning);
+#endif
+      }
+      break;
+    }
+    prev = running;
+  }
+
+  // Halt the coroutine.
+  targetCoroutine->id = COROUTINE_ID_NOT_SET;
+  targetCoroutine->state = COROUTINE_STATE_NOT_RUNNING;
+  memcpy(&targetCoroutine->context, &targetCoroutine->resetContext, sizeof(jmp_buf));
+#ifdef THREADSAFE_COROUTINES
+  if (!_coroutineThreadingSupportEnabled) {
+    coroutineGlobalPush(&_globalIdle, targetCoroutine);
+  }
+  else {
+    coroutineTssPush(&_tssIdle, targetCoroutine);
+  }
+#else
+  coroutineGlobalPush(&_globalIdle, targetCoroutine);
+#endif
+
+  // Unlock any mutexes the coroutine had locked.
+  if (mutexes != NULL) {
+    for (int i = 0; mutexes[i] != NULL; i++) {
+      if (mutexes[i]->coroutine == targetCoroutine) {
+        // Unlock the mutex.
+        mutexes[i]->recursionLevel = 0;
+        mutexes[i]->coroutine = NULL;
+      }
+    }
+  }
+
+  // Remove the coroutine from any condition it was waiting on.
+  if (targetCoroutine->prevToSignal != NULL) {
+    targetCoroutine->prevToSignal->nextToSignal = targetCoroutine->nextToSignal;
+  }
+  if (targetCoroutine->nextToSignal != NULL) {
+    targetCoroutine->nextToSignal->prevToSignal = targetCoroutine->prevToSignal;
+  }
+
+  return coroutineSuccess;
 }
 
 /// void coroutineStart(void)
