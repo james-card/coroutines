@@ -1,5 +1,5 @@
 # Coroutines
-This is a C coroutines library based on the work of [Tony Finch](http://www.dotat.at/cgi/git/picoro.git).  This approach segments the main stack into sub-stacks for the coroutines.  This library aims to provide a full-featured set of functionality for coroutines in pure C (no assembly or dependencies on third-party libraries).  Relative to what Tony originally wrote, the changes and extensions are as follows:
+This is a C coroutines library based on the work of [Tony Finch](http://www.dotat.at/cgi/git/picoro.git).  This approach does not use dynamic memory.  It segments the main stack into sub-stacks for the coroutines.  This library aims to provide a full-featured set of functionality for coroutines in pure C (no assembly or dependencies on third-party libraries).  Relative to what Tony originally wrote, the changes and extensions are as follows:
 * Removed use of assert.  Functions now check for invalid parameters and have special return values for errors.
 * Fixed non-ISO C compliant passing of function pointers as parameters to calls that take void pointers.
 * Made `COROUTINE_STACK_SIZE` a compile-time define that defaults to 16 KB.
