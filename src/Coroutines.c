@@ -1202,12 +1202,17 @@ int conditionTimedwait(Cocondition *cond, Comutex *mtx,
   if ((returnValue == coroutineSuccess) && (cond->numSignals > 0)) {
     cond->numSignals--;
     cond->numWaiters--;
-    cond->head = running->nextToSignal;
-    if (cond->tail == running) {
-      // We are the last node.  Clean up.
-      cond->tail = NULL;
-      cond->numSignals = 0;
-      cond->numWaiters = 0;
+    if (running->prevToSignal != NULL) {
+      running->prevToSignal->nextToSignal = running->nextToSignal;
+    } else {
+      // We are the head of the queue.
+      cond->head = running->nextToSignal;
+    }
+    if (running->nextToSignal != NULL) {
+      running->nextToSignal->prevToSignal = running->prevToSignal;
+    } else {
+      // We are the tail of the queue;
+      cond->tail = running->prevToSignal;
     }
     returnValue = coroutineSuccess;
   } else if (returnValue == coroutineTimedout) {
@@ -1282,11 +1287,17 @@ int coconditionWait(Cocondition *cond, Comutex *mtx) {
     cond->numSignals--;
     cond->numWaiters--;
     cond->head = running->nextToSignal;
-    if (cond->tail == running) {
-      // We are the last node.  Clean up.
-      cond->tail = NULL;
-      cond->numSignals = 0;
-      cond->numWaiters = 0;
+    if (running->prevToSignal != NULL) {
+      running->prevToSignal->nextToSignal = running->nextToSignal;
+    } else {
+      // We are the head of the queue.
+      cond->head = running->nextToSignal;
+    }
+    if (running->nextToSignal != NULL) {
+      running->nextToSignal->prevToSignal = running->prevToSignal;
+    } else {
+      // We are the tail of the queue;
+      cond->tail = running->prevToSignal;
     }
   } else {
     // The condition has been destroyed out from under us.  Invalid state.
