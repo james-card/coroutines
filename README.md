@@ -15,6 +15,10 @@ This is a C coroutines library based on the work of [Tony Finch](http://www.dota
 * Added thread safety to the libraries that is compile-time supported but runtime-disabled by default.
   * Compile-time support can be disabled by setting the `SINGLE_CORE_COROUTINES` define at compile time.
   * Disabling thread safety at compile time also eliminates the need for dynamic memory.
+* Added a mechanism for the coroutine stack size to be set at runtime.
+  * The default size is 16 KB.
+  * The stack size must be set before the first coroutine is created.
+  * The stack size can be set in a multiple of 1 KB.
 
 Really, coroutines are best suited for embedded systems, but this approach can be used within an individual process as well.  This implementation is provided for anyone who is looking for a full-featured C coroutines library.
 
