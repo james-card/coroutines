@@ -16,7 +16,7 @@
 ///                    git://git.chiark.greenend.org.uk/~fanf/picoro.git
 ///
 /// @copyright
-///                   Copyright (c) 2012-2022 James Card
+///                   Copyright (c) 2012-2023 James Card
 ///
 /// Permission is hereby granted, free of charge, to any person obtaining a
 /// copy of this software and associated documentation files (the "Software"),
@@ -81,15 +81,11 @@ extern "C"
 /// provided coroutine is blocked within a blocking coroutine operation.
 #define COROUTINE_BLOCKED ((void*) ((intptr_t) -2))
 
-/// @def COROUTINE_STACK_SIZE
+/// @def COROUTINE_DEFAULT_STACK_SIZE_K
 ///
-/// @brief The size of the stack for a coroutine.  MSVC requires that the stack
-/// be 16-byte aligned, so make sure we adhere to that.
-#ifndef COROUTINE_STACK_SIZE
-#define COROUTINE_STACK_SIZE (16 * 1024)
-#endif
-#if (COROUTINE_STACK_SIZE & 15) != 0
-#error COROUTINE_STACK_SIZE must be divisible by 16.
+/// @brief The default size of the stack for a coroutine, in KB.
+#ifndef COROUTINE_DEFAULT_STACK_SIZE_K
+#define COROUTINE_DEFAULT_STACK_SIZE_K 16
 #endif
 
 /// @def COROUTINE_ID_NOT_SET
@@ -164,6 +160,7 @@ CoroutineState coroutineState(Coroutine *coroutine);
 void coroutineSetThreadingSupportEnabled(bool state);
 bool coroutineThreadingSupportEnabled();
 #endif
+int coroutineSetStackSizeK(int stackSizeK);
 
 
 // Coroutine mutex support.

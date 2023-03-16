@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //                                                                            //
-//                     Copyright (c) 2012-2022 James Card                     //
+//                     Copyright (c) 2012-2023 James Card                     //
 //                                                                            //
 // Permission is hereby granted, free of charge, to any person obtaining a    //
 // copy of this software and associated documentation files (the "Software"), //
@@ -38,7 +38,7 @@
 #include <string.h>
 
 // Prototype forward declarations for mutual recursion.
-void coroutineStart(void);
+void coroutineAllocateStack(int stackSizeK);
 void coroutineMain(void*);
 
 /// @def ZEROINIT
@@ -103,6 +103,11 @@ static Coroutine* _globalIdle = NULL;
 ///
 /// @brief Value to be passed between contexts by the coroutinePass() function.
 static void* _globalSaved = NULL;
+
+/// @var static int _globalStackSizeK
+///
+/// @brief The size of each coroutine's stack in KB.
+static int _globalStackSizeK = 16;
 
 /// @fn void coroutineGlobalPush(Coroutine **list, Coroutine *coroutine)
 ///
@@ -179,6 +184,11 @@ ZEROINIT(static tss_t _tssIdle);
 /// @brief Value to be passed between contexts by the coroutinePass() function.
 ZEROINIT(static tss_t _tssSaved);
 
+/// @var static tss_t _tssStackSizeK
+///
+/// @brief Thread-specific size of each coroutine's stack, in KB.
+ZEROINIT(static tss_t _tssStackSizeK);
+
 /// @var static once_flag _threadMetadataSetup
 ///
 /// @brief once_flag to make sure we only initialize the thread-specific storage
@@ -197,19 +207,23 @@ void coroutineSetupThreadMetadata(void) {
   // need destructors.
   int status = tss_create(&_tssFirst, free);
   if (status != thrd_success) {
-    fprintf(stderr, "Could not initialize _first.\n");
+    fprintf(stderr, "Could not initialize _tssFirst.\n");
   }
   status = tss_create(&_tssRunning, NULL);
   if (status != thrd_success) {
-    fprintf(stderr, "Could not initialize _running.\n");
+    fprintf(stderr, "Could not initialize _tssRunning.\n");
   }
   status = tss_create(&_tssIdle, NULL);
   if (status != thrd_success) {
-    fprintf(stderr, "Could not initialize _idle.\n");
+    fprintf(stderr, "Could not initialize _tssIdle.\n");
   }
   status = tss_create(&_tssSaved, NULL);
   if (status != thrd_success) {
-    fprintf(stderr, "Could not initialize saved.\n");
+    fprintf(stderr, "Could not initialize _tssSaved.\n");
+  }
+  status = tss_create(&_tssStackSizeK, NULL);
+  if (status != thrd_success) {
+    fprintf(stderr, "Could not initialize _tssStackSizeK.\n");
   }
 }
 
@@ -478,22 +492,28 @@ Coroutine* coroutineCreate(void* func(void *arg)) {
 
   Coroutine* idle = _globalIdle;
   Coroutine* running = _globalRunning;
+  int stackSizeK = _globalStackSizeK;
 #ifdef THREADSAFE_COROUTINES
   call_once(&_threadMetadataSetup, coroutineSetupThreadMetadata);
   coroutineInitializeThreadMetadata();
   if (_coroutineThreadingSupportEnabled) {
     idle = (Coroutine*) tss_get(_tssIdle);
     running = (Coroutine*) tss_get(_tssRunning);
+    stackSizeK = (int) ((intptr_t) tss_get(_tssStackSizeK));
+    if (stackSizeK == 0) {
+      stackSizeK = _globalStackSizeK;
+      tss_set(_tssStackSizeK, (void*) ((intptr_t) stackSizeK));
+    }
   }
 #endif
   // The current coroutine is at the head of the running list.
   if ((idle == NULL) && (!setjmp(running->context))) {
     // We've just been called from the calling function and need to create a
     // new Coroutine instance, including its stack.
-    coroutineStart();
+    coroutineAllocateStack(stackSizeK);
   }
   // Either there was an idle coroutine on the idle list or we just returned
-  // from coroutineMain (called by coroutineStart).  Either way, the Coroutine
+  // from coroutineMain (called by coroutineAllocateStack).  Either way, the Coroutine
   // instance we want to use is now at the head of the idle list.
 
   // The head of the idle list has the Coroutine allocated in coroutineMain.
@@ -540,7 +560,13 @@ Coroutine* coroutineCreate(void* func(void *arg)) {
 /// coroutineYield() except for adding the coroutine to the idle list.) We can
 /// then only be resumed by the coroutineCreate() constructor function which
 /// will put us back on the running list and pass us a new function to call.
-void coroutineMain(void *ret) {
+///
+/// @param stack A pointer to the stack that was allocated for the coroutine.
+///   This parameter is taken from the stack allocation function so that the
+///   stack allocated there doesn't get optimized out by the compiler.
+///
+/// @return This function returns no value and, in fact, never returns.
+void coroutineMain(void *stack) {
   ZEROINIT(Coroutine me);
   me.id = COROUTINE_ID_NOT_SET;
 #ifdef THREADSAFE_COROUTINES
@@ -564,7 +590,7 @@ void coroutineMain(void *ret) {
   // it to drop into its main loop and we will be on the idle stack ready to
   // take in a new function pointer when we're resumed.
   FuncData funcData;
-  funcData.data = coroutinePass(&me, ret);
+  funcData.data = coroutinePass(&me, stack);
   void *(*func)(void *arg);
   func = funcData.func;
 
@@ -572,17 +598,23 @@ void coroutineMain(void *ret) {
   // coroutineResume().  coroutineResume() pushed the new coroutine (the one
   // we're in the middle of constructing that was declared as "me" above) onto
   // the running list before returning control to us.  So the return point
-  // we're about to set is for ourself.  The call to coroutineStart here will
-  // allocate the next Coroutine on the idle list to be used in the next call
-  // to the constructor.
+  // we're about to set is for ourself.  The call to coroutineAllocateStack here
+  // will allocate the next Coroutine on the idle list to be used in the next
+  // call to the constructor.
   Coroutine* running = _globalRunning;
+  int stackSizeK = _globalStackSizeK;
 #ifdef THREADSAFE_COROUTINES
   if (_coroutineThreadingSupportEnabled) {
     running = (Coroutine*) tss_get(_tssRunning);
+    stackSizeK = (int) ((intptr_t) tss_get(_tssStackSizeK));
+    if (stackSizeK == 0) {
+      stackSizeK = _globalStackSizeK;
+      tss_set(_tssStackSizeK, (void*) ((intptr_t) stackSizeK));
+    }
   }
 #endif
   if (!setjmp(running->context)) {
-    coroutineStart();
+    coroutineAllocateStack(stackSizeK);
   }
 
   if (setjmp(running->resetContext)) {
@@ -612,7 +644,7 @@ void coroutineMain(void *ret) {
     void* callingArgument = coroutineYield(&me);
 
     // Call the target function with the calling argument.
-    ret = func(callingArgument);
+    void* ret = func(callingArgument);
 
     // Deallocate the currently running coroutine and make it available to the
     // next iteration of the constructor.
@@ -734,14 +766,18 @@ int coroutineKill(Coroutine *targetCoroutine, Comutex **mutexes) {
   return coroutineSuccess;
 }
 
-/// void coroutineStart(void)
+/// void coroutineAllocateStack(int stackSizeK)
 ///
 /// @brief Allocate space for the current stack to grow before creating the
 /// initial stack frame for the next coroutine.
 ///
 /// @return This function returns no value.
-void coroutineStart(void) {
-  ZEROINIT(char stack[COROUTINE_STACK_SIZE]);
+void coroutineAllocateStack(int stackSizeK) {
+  ZEROINIT(char stack[1024]); // 1 KB
+  if (stackSizeK > 1) {
+    coroutineAllocateStack(stackSizeK - 1);
+  }
+  
   coroutineMain(stack);
 }
 
@@ -839,6 +875,39 @@ bool coroutineThreadingSupportEnabled() {
 }
 
 #endif // THREADSAFE_COROUTINES
+
+/// @fn int coroutineSetStackSizeK(int stackSizeK)
+///
+/// @brief Set the minimum size of a coroutine's stack, in KB.
+///
+/// @param stackSizeK The desired size of a coroutine's stack, in KB.
+///
+/// @return Returns 0 on success, -1 on error.
+int coroutineSetStackSizeK(int stackSizeK) {
+  Coroutine* idle = _globalIdle;
+#ifdef THREADSAFE_COROUTINES
+  if (_coroutineThreadingSupportEnabled) {
+    idle = (Coroutine*) tss_get(_tssIdle);
+  }
+#endif // THREADSAFE_COROUTINES
+  
+  if (idle != NULL) {
+    fprintf(stderr,
+      "coroutineSetStackSizeK called after coroutine creation.\n");
+    fprintf(stderr, "Cannot execute coroutineSetStackSizeK.\n");
+    return -1;
+  }
+  
+  // If we made it this far, we're allowed to set the coroutine stack size.
+  _globalStackSizeK = stackSizeK;
+#ifdef THREADSAFE_COROUTINES
+  if (_coroutineThreadingSupportEnabled) {
+    tss_set(_tssStackSizeK, (void*) ((intptr_t) stackSizeK));
+  }
+#endif // THREADSAFE_COROUTINES
+  
+  return 0;
+}
 
 /// @fn int comutexInit(Comutex* mtx, int type)
 ///

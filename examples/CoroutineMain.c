@@ -209,6 +209,13 @@ int loadAndRunCoroutines(void *args) {
   (void) args;
 #endif
 
+  if (coroutineSetStackSizeK(1) != 0) {
+    fprintf(stderr, "ERROR:  Could not set coroutine stack size to 1K.\n");
+  }
+  if (coroutineSetStackSizeK(4) != 0) {
+    fprintf(stderr, "ERROR:  Could not set coroutine stack size to 4K.\n");
+  }
+
   Coroutine *coroutineArray[NUM_COROUTINES];
   // Assign the instances function numbers.
   int coroutineStorage[NUM_COROUTINES] = {1, 2, 3};
