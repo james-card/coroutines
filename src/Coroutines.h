@@ -55,8 +55,11 @@ extern "C"
 #include <time.h>
 #include <stdint.h>
 
-#if !defined(SINGLE_CORE_COROUTINES) && !defined(THREADSAFE_COROUTINES)
-#define THREADSAFE_COROUTINES
+#if !defined(SINGLE_CORE_COROUTINES) && !defined(THREAD_SAFE_COROUTINES)
+#define THREAD_SAFE_COROUTINES
+#endif
+#if defined(SINGLE_CORE_COROUTINES) && defined(THREAD_SAFE_COROUTINES)
+#error "Only one of SINGLE_CORE_COROUTINES or THREAD_SAFE_COROUTINES may be defined."
 #endif
 
 // Base coroutine support.
@@ -104,6 +107,22 @@ typedef enum CoroutineState {
   NUM_COROUTINE_STATES
 } CoroutineState;
 
+/// @union CoroutineFuncData
+///
+/// @brief Translation between a function pointer and a data pointer.
+///
+/// @details Due to the way this library works, we sometimes need to pass and
+/// return function pointers to our yield and resume functions, which take and
+/// return data pointers.  ISO C doesn't permit casting between these two, so
+/// we use a union to do the conversion.
+///
+/// @param func The function pointer portion of the pointer value.
+/// @param data The data pointer portion of the pointer value.
+typedef union CoroutineFuncData {
+  void* (*func)(void*);
+  void* data;
+} CoroutineFuncData;
+
 /// @struct Coroutine
 ///
 /// @brief Data structure to manage an individual coroutine.
@@ -115,6 +134,8 @@ typedef enum CoroutineState {
 /// @param nextToSignal The next coroutine to signal when waiting on a signal.
 /// @param prevToSignal The previous coroutine to signal when waiting on a
 ///   signal.
+/// @param passed The CoroutineFuncData that's passed between contexts by the
+///   coroutinePass function (on a yield or resume call).
 typedef struct Coroutine {
   struct Coroutine *next;
   jmp_buf context;
@@ -123,6 +144,7 @@ typedef struct Coroutine {
   struct Coroutine *nextToSignal;
   struct Coroutine *prevToSignal;
   jmp_buf resetContext;
+  CoroutineFuncData passed;
 } Coroutine;
 
 /// @def coroutineResumable(coroutinePointer)
@@ -150,17 +172,17 @@ typedef struct Coroutine {
     && (coroutinePointer->state == COROUTINE_STATE_NOT_RUNNING))
 
 // Coroutine function prototypes.  Doxygen inline in source file.
+int coroutineConfig(int stackSizeK, Coroutine *first);
 Coroutine* coroutineCreate(void* func(void *arg));
 void* coroutineResume(Coroutine *targetCoroutine, void *arg);
 void* coroutineYield(void *arg);
 int coroutineSetId(Coroutine *coroutine, int64_t id);
 int64_t coroutineId(Coroutine *coroutine);
 CoroutineState coroutineState(Coroutine *coroutine);
-#ifdef THREADSAFE_COROUTINES
+#ifdef THREAD_SAFE_COROUTINES
 void coroutineSetThreadingSupportEnabled(bool state);
 bool coroutineThreadingSupportEnabled();
 #endif
-int coroutineSetStackSizeK(int stackSizeK);
 
 
 // Coroutine mutex support.

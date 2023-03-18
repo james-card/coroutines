@@ -4,11 +4,25 @@
 #include <stdint.h>
 
 #include "Coroutines.h"
-#ifdef THREADSAFE_COROUTINES
+#ifdef THREAD_SAFE_COROUTINES
 #include "CThreads.h"
 #endif
 
 #define NUM_COROUTINES 3
+
+/// @def ZEROINIT
+///
+/// @brief Define the proper way to declare a zeroized variable based on the
+/// compiler environment.
+#ifdef __cplusplus
+#ifdef _MSC_VER
+#define ZEROINIT(x) x = {0}
+#else // Non-Visual Studio C++
+#define ZEROINIT(x) x = {}
+#endif // _MSC_VER
+#else // __cplusplus not defined
+#define ZEROINIT(x) x = {0}
+#endif // __cplusplus
 
 /// @fn uint64_t getElapsedMicroseconds(uint64_t previousTime)
 ///
@@ -169,7 +183,7 @@ int scheduleRoundRobin(Coroutine *coroutineArray[], int numCoroutines) {
   return 0;
 }
 
-#ifdef THREADSAFE_COROUTINES
+#ifdef THREAD_SAFE_COROUTINES
 /// @struct LoadAndRunCoroutinesArgs
 ///
 /// @brief In thread-enabled systems, this structure contains the parameters to
@@ -195,7 +209,7 @@ typedef struct LoadAndRunCoroutinesArgs {
 ///
 /// @param Returns the number of microseconds required for execution.
 int loadAndRunCoroutines(void *args) {
-#ifdef THREADSAFE_COROUTINES
+#ifdef THREAD_SAFE_COROUTINES
   LoadAndRunCoroutinesArgs *mutexAndCondition
     = (LoadAndRunCoroutinesArgs*) args;
   if (mutexAndCondition != NULL) {
@@ -209,10 +223,12 @@ int loadAndRunCoroutines(void *args) {
   (void) args;
 #endif
 
-  if (coroutineSetStackSizeK(1) != 0) {
+  ZEROINIT(Coroutine mainCoroutine);
+
+  if (coroutineConfig(1, NULL) != coroutineSuccess) {
     fprintf(stderr, "ERROR:  Could not set coroutine stack size to 1K.\n");
   }
-  if (coroutineSetStackSizeK(4) != 0) {
+  if (coroutineConfig(4, &mainCoroutine) != coroutineSuccess) {
     fprintf(stderr, "ERROR:  Could not set coroutine stack size to 4K.\n");
   }
 
@@ -271,7 +287,7 @@ int loadAndRunCoroutines(void *args) {
 /// improves over time.  Runs the full set of coroutines a second time and
 /// captures the time requried for execution.
 ///
-/// If running in a system that supports threading (THREADSAFE_COROUTINES is
+/// If running in a system that supports threading (THREAD_SAFE_COROUTINES is
 /// defined), enables support for threading in the Coroutines library and
 /// re-runs the set of coroutines and again captures the duration of execution.
 ///
@@ -302,7 +318,7 @@ int main(int argc, char **argv) {
   // Coroutine threading support is disabled by default.
   int noThreadingRunTime = loadAndRunCoroutines(NULL);
 
-#ifdef THREADSAFE_COROUTINES
+#ifdef THREAD_SAFE_COROUTINES
   // Get baseline with threading enabled but no concurrent threads.
   coroutineSetThreadingSupportEnabled(true);
   int threadingRunTimeBaseline = loadAndRunCoroutines(NULL);
@@ -366,7 +382,7 @@ int main(int argc, char **argv) {
     (unsigned int) noThreadingRunTime / 1000000,
     (unsigned int) noThreadingRunTime % 1000000);
 
-#ifdef THREADSAFE_COROUTINES
+#ifdef THREAD_SAFE_COROUTINES
   printf(
     "Scheduled tasks completed in %u.%06u seconds with threading.\n",
     (unsigned int) threadingRunTimeBaseline / 1000000,
