@@ -214,7 +214,7 @@ int loadAndRunCoroutines(void *args) {
   if (coroutineConfig(1, NULL) != coroutineSuccess) {
     fprintf(stderr, "ERROR:  Could not set coroutine stack size to 1K.\n");
   }
-  if (coroutineConfig(4, &mainCoroutine) != coroutineSuccess) {
+  if (coroutineConfig(8, &mainCoroutine) != coroutineSuccess) {
     fprintf(stderr, "ERROR:  Could not set coroutine stack size to 4K.\n");
   }
 
