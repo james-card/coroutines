@@ -930,6 +930,7 @@ int coroutineConfig(int stackSizeK, Coroutine *first) {
 #endif // THREAD_SAFE_COROUTINES
   _globalStackSizeK = stackSizeK;
   if (first != NULL) {
+    memset(first, 0, sizeof(Coroutine));
     _globalRunning = first;
   }
 

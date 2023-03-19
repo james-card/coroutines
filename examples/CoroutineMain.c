@@ -10,20 +10,6 @@
 
 #define NUM_COROUTINES 3
 
-/// @def ZEROINIT
-///
-/// @brief Define the proper way to declare a zeroized variable based on the
-/// compiler environment.
-#ifdef __cplusplus
-#ifdef _MSC_VER
-#define ZEROINIT(x) x = {0}
-#else // Non-Visual Studio C++
-#define ZEROINIT(x) x = {}
-#endif // _MSC_VER
-#else // __cplusplus not defined
-#define ZEROINIT(x) x = {0}
-#endif // __cplusplus
-
 /// @fn uint64_t getElapsedMicroseconds(uint64_t previousTime)
 ///
 /// @brief Get the number of microseconds that has elapsed since a previous
@@ -223,7 +209,7 @@ int loadAndRunCoroutines(void *args) {
   (void) args;
 #endif
 
-  ZEROINIT(Coroutine mainCoroutine);
+  Coroutine mainCoroutine;
 
   if (coroutineConfig(1, NULL) != coroutineSuccess) {
     fprintf(stderr, "ERROR:  Could not set coroutine stack size to 1K.\n");
