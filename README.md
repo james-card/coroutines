@@ -15,9 +15,10 @@ This is a C coroutines library based on the work of [Tony Finch](http://www.dota
 * Added a mechanism for the coroutine stack size to be set at runtime.
   * The default size is 16 KB.
   * The stack size is set in a multiple of 1 KB.
-  * The minimum stack size is 1 KB irrespective of the size specified.
   * The stack size must be set before the first coroutine is created on the current thread.
   * This size also defines the stack size for the main routine (the routine that calls coroutineCreate).
+* Removed static default first Coroutine within the library.
+* Added a mechanism to provide a first Coroutine context to operate from.
 
 Really, coroutines are best suited for embedded systems, but this approach can be used within an individual process as well.  This implementation is provided for anyone who is looking for a full-featured C coroutines library.
 
@@ -29,13 +30,15 @@ An example of a simple set of coroutines in a round robin scheduler can be found
 
 The output of the program is a good example of branch prediction.  The iterations get faster the longer the program runs (up to a point).  I had to throw away the results of the first run because of this.
 
-# Coroutines and Multithreading
-No calls to threading functions are made when threading support isn't enabled at runtime.  This is deliberate.  Threading calls are almost guaranteed to make use of dynamic memory, which is specifically avoided by this library.  Because of the technique used to subdivide the stack, it would be possible to implement a simple dynamic memory manager using this coroutines library and then enable threading at the system level.  Although the wisdom of doing this would be questionable, avoiding threading calls unless explicitly enabled to do so at runtime allows for this possibility.
-
-## Configuring Coroutines on Threads
-Calling coroutineConfig is optional on the main thread.  If it is not called before the first coroutine is created on the main thread, a default first Coroutine context will be used with a stack size of 16 KB.  For all other threads, it is *MANDATORY* to call coroutineConfig before making any other coroutine calls.  A pointer to a valid Coroutine object must be provided.  This allows for the complete absence of any dynamic memory allocation in the Coroutines library.
+# Configuring Coroutines
+coroutineConfig must be called on the current thread before any other coroutine operations are performed.  coroutineConfig can configure the stack size of the coroutines and the Coroutine to use for the main Coroutine (the part of the program that calls coroutineCreate).  If a stack size of less than 1 KB is provided to coroutineConfig, the default stack size will be used.  Currently, this default is 16 KB.  If a NULL first Coroutine pointer is provided then the first Coroutine used by the library for the current thread will not be changed.  This is only permitted if a valid first Coroutine pointer has previously been specified.  Providing the first Coroutine to use from outside the library allows the library to operate without the need for dynamic memory.
 
 coroutineConfig may be called successfully any number of times before the first coroutine is created on a thread but will fail thereafter.  Calling coroutineConfig after the first coroutine of the thread has been created will have no effect on any of the coroutine settings for that thread.
 
+All coroutines (and the routine that issues all coroutineCreate calls) have the same stack size.  This is due to the way the stack subdivision process works.  What actually happens on a call to coroutineCreate is that the current stack is extended by the specified size.  Allowing for the stack size to be changed during the lifetime of the thread would result in counterintuitive behavior that would be error prone.
+
+# Coroutines and Multithreading
+No calls to threading functions are made when threading support isn't enabled at runtime.  This is deliberate.  Threading calls are almost guaranteed to make use of dynamic memory, which is specifically avoided by this library.  Because of the technique used to subdivide the stack, it would be possible to implement a simple dynamic memory manager using this coroutines library and then enable threading at the system level.  Although the wisdom of doing this would be questionable, avoiding threading calls unless explicitly enabled to do so at runtime allows for this possibility.
+
 # Debugging
-Good luck!  Segmenting the stack wreaks havoc with valgrind.  It will complain about uninitialized values all over the place.  I assure you that it's wrong in all the areas I've looked into.  The Visual Studio debugger does, however, update its stack correctly after a context switch, so it may be a better choice for debugging simple things than Linux/valgrind.
+Good luck!  Segmenting the stack wreaks havoc with valgrind.  It will complain about uninitialized values all over the place becaue it considers any values on the stack above a return point to be uninitialized.  coroutineCreate sets up the stack and then returns to the calling function, which confuses valgrind like this.  The Visual Studio debugger does, however, update its stack correctly after a context switch, so it may be a better choice for debugging simple things than Linux/valgrind.  It would probably be best to debug coroutines as independent funcitons (that do not yield) first before trying to use them as coroutines.
