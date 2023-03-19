@@ -44,3 +44,5 @@ If you do want to make use of coroutines in a multi-threaded environment, make s
 
 # Debugging
 Good luck!  Segmenting the stack wreaks havoc with valgrind.  It will complain about uninitialized values all over the place becaue it considers any values on the stack above a return point to be uninitialized.  coroutineCreate sets up the stack and then returns to the calling function, which confuses valgrind like this.  The Visual Studio debugger does, however, update its stack correctly after a context switch, so it may be a better choice for debugging simple things than Linux/valgrind.  It would probably be best to debug coroutines as independent funcitons (that do not yield) first before trying to use them as coroutines.
+
+If you're getting segmentation faults when attempting to resume or when returning from a yield, you probably need to increase your stack size.  The Coroutine objects and their associated contexts are stored at the top of each stack segment.  If the segment below overflows the context will get corrupted and these calls are likely to crash.
