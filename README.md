@@ -2,8 +2,6 @@
 This is a C coroutines library based on the work of [Tony Finch](http://www.dotat.at/cgi/git/picoro.git).  This approach does not use dynamic memory.  It segments the main stack into sub-stacks for the coroutines.  This library aims to provide a full-featured set of functionality for coroutines in pure C (no assembly or dependencies on third-party libraries).  Relative to what Tony originally wrote, the changes and extensions are as follows:
 * Removed use of assert.  Functions now check for invalid parameters and have special return values for errors.
 * Fixed non-ISO C compliant passing of function pointers as parameters to calls that take void pointers.
-* Made `COROUTINE_STACK_SIZE` a compile-time define that defaults to 16 KB.
-  * NOTE: This also defines the stack size of the main routine (the function setting up the coroutines).
 * Added ID property to coroutine object and accompanying setter/getter.
   * This is provided so that the coroutine can identify its place in an array of croutine-specific storage.
 * Added coroutine mutexes.
@@ -14,12 +12,12 @@ This is a C coroutines library based on the work of [Tony Finch](http://www.dota
 * Renamed previous "state" memeber of the coroutine object to "context" and added a CoroutineState to track the running state of the coroutine.
 * Added thread safety to the libraries that is compile-time supported but runtime-disabled by default.
   * Compile-time support can be disabled by setting the `SINGLE_CORE_COROUTINES` define at compile time.
-  * Disabling thread safety at compile time also eliminates the need for dynamic memory.
 * Added a mechanism for the coroutine stack size to be set at runtime.
   * The default size is 16 KB.
   * The stack size is set in a multiple of 1 KB.
   * The minimum stack size is 1 KB irrespective of the size specified.
   * The stack size must be set before the first coroutine is created on the current thread.
+  * This size also defines the stack size for the main routine (the routine that calls coroutineCreate).
 
 Really, coroutines are best suited for embedded systems, but this approach can be used within an individual process as well.  This implementation is provided for anyone who is looking for a full-featured C coroutines library.
 
@@ -31,28 +29,13 @@ An example of a simple set of coroutines in a round robin scheduler can be found
 
 The output of the program is a good example of branch prediction.  The iterations get faster the longer the program runs (up to a point).  I had to throw away the results of the first run because of this.
 
-# Performance Differences
-The difference in performance between with and without thread safety is due to thread-safe coroutines having to make use of thread-specific storage rather than global variables.  The difference in performance between a single thread and multiple threads is due to resource contention among threads on the thread-specific storage lookups.
+# Coroutines and Multithreading
+No calls to threading functions are made when threading support isn't enabled at runtime.  This is deliberate.  Threading calls are almost guaranteed to make use of dynamic memory, which is specifically avoided by this library.  Because of the technique used to subdivide the stack, it would be possible to implement a simple dynamic memory manager using this coroutines library and then enable threading at the system level.  Although the wisdom of doing this would be questionable, avoiding threading calls unless explicitly enabled to do so at runtime allows for this possibility.
 
-## Performance Differences as Measured in WSL
-Windows Subsystem Linux uses pthreads for the thread-specific storage mechanisms.  There is a small overhead introduced by the ISO C threads wrapper I put around them in my cthreads library.
-```
-Scheduled tasks completed in 2.569028 seconds without threading.
-Scheduled tasks completed in 2.588351 seconds with threading.
-* 100.75% of non-threading baseline.
-Scheduled tasks completed in an average of 7.599144 seconds with multithreading.
-* 293.59% of threading baseline.
-```
+## Configuring Coroutines on Threads
+Calling coroutineConfig is optional on the main thread.  If it is not called before the first coroutine is created on the main thread, a default first Coroutine context will be used with a stack size of 16 KB.  For all other threads, it is *MANDATORY* to call coroutineConfig before making any other coroutine calls.  A pointer to a valid Coroutine object must be provided.  This allows for the complete absence of any dynamic memory allocation in the Coroutines library.
 
-## Performance Differences as Measured in a Windows Release Build
-Visual Studio does not support ISO C threads and has very different mechanisms than pthreads for most things.  I implemented an ISO C threads library to get equivalent functionality.  The biggest difference between Windows and the ISO C threads standard is how thread-specific storage is supposed to work, which the coroutines library makes heavy use of.  In my implementation, I use red-black trees for the lookup mechanism, which may be suboptimal relative to whatever the implementation in pthreads is.
-```
-Scheduled tasks completed in 1.151290 seconds without threading.
-Scheduled tasks completed in 1.347941 seconds with threading.
-* 117.08% of non-threading baseline.
-Scheduled tasks completed in an average of 4.444585 seconds with multithreading.
-* 329.73% of threading baseline.
-```
+coroutineConfig may be called successfully any number of times before the first coroutine is created on a thread but will fail thereafter.  Calling coroutineConfig after the first coroutine of the thread has been created will have no effect on any of the coroutine settings for that thread.
 
 # Debugging
 Good luck!  Segmenting the stack wreaks havoc with valgrind.  It will complain about uninitialized values all over the place.  I assure you that it's wrong in all the areas I've looked into.  The Visual Studio debugger does, however, update its stack correctly after a context switch, so it may be a better choice for debugging simple things than Linux/valgrind.
