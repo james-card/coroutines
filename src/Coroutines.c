@@ -57,21 +57,20 @@ void coroutineMain(void*);
 
 // Use statically-allocated global variables for use wihtout threading.
 
-/// @var static Coroutine _globalFirst
+/// @var static Coroutine *_globalFirst
 ///
 /// @brief Library-private first (main) routine.
-ZEROINIT(static Coroutine _globalFirst);
+static Coroutine *_globalFirst = NULL;
 
 /// @var static Coroutine *_globalRunning
 ///
 /// @brief Library-private head of the running list.
 ///
 /// @details The coroutine at the head of the running LIFO list has the CPU, and
-/// all others are suspended inside coroutineResume(). The "first" coro object
-/// holds the context for the process's initial stack and also ensures that all
-/// externally-visible list elements have non-NULL next pointers.  (The "first"
-/// coroutine isn't exposed to the caller.)
-static Coroutine* _globalRunning = &_globalFirst;
+/// all others are suspended inside coroutineResume(). The first Coroutine
+/// object holds the context for the process's initial stack and also ensures
+/// that all externally-visible list elements have non-NULL next pointers.
+static Coroutine* _globalRunning = NULL;
 
 /// @var static Coroutine *_globalIdle
 ///
@@ -309,18 +308,21 @@ CoroutineFuncData coroutinePass(Coroutine *currentCoroutine, CoroutineFuncData a
 #else
       Coroutine *targetCoroutine = _globalRunning;
 #endif
+
+      if (targetCoroutine != NULL) {
 #if defined(_MSC_VER) && defined(_M_X64)
-      // This should *NOT* be necessary.  The intent of longjmp is to restore
-      // the context of the registers captured at setjmp, however the MSVC x64
-      // implementation of longjmp only does this if the value of
-      // _JUMP_BUFFER.Frame is 0.  This is a non-standard and broken
-      // implementation, but thankfully a workaround does exist, so I won't
-      // complain beyond this comment.
-      _JUMP_BUFFER* context = (_JUMP_BUFFER*) &targetCoroutine->context;
-      context->Frame = 0;
+        // This should *NOT* be necessary.  The intent of longjmp is to restore
+        // the context of the registers captured at setjmp, however the MSVC x64
+        // implementation of longjmp only does this if the value of
+        // _JUMP_BUFFER.Frame is 0.  This is a non-standard and broken
+        // implementation, but thankfully a workaround does exist, so I won't
+        // complain beyond this comment.
+        _JUMP_BUFFER* context = (_JUMP_BUFFER*) &targetCoroutine->context;
+        context->Frame = 0;
 #endif // _MSC_VER
-      targetCoroutine->passed = arg;
-      longjmp(targetCoroutine->context, 1);
+        targetCoroutine->passed = arg;
+        longjmp(targetCoroutine->context, 1);
+      }
     }
   } else {
     currentCoroutine->passed.data = NULL;
@@ -357,10 +359,20 @@ void* coroutineResume(Coroutine *targetCoroutine, void *arg) {
   if (coroutineResumable(targetCoroutine)) {
     Coroutine *currentCoroutine = _globalRunning;
 #ifdef THREAD_SAFE_COROUTINES
+    if (_coroutineThreadingSupportEnabled) {
+      currentCoroutine = (Coroutine*) tss_get(_tssRunning);
+    }
+#endif
+
+    if (currentCoroutine == NULL) {
+      // The running stack hasn't been defined yet.  Bail.
+      return NULL;
+    }
+
+#ifdef THREAD_SAFE_COROUTINES
     if (!_coroutineThreadingSupportEnabled) {
       coroutineGlobalPush(&_globalRunning, targetCoroutine);
     } else {
-      currentCoroutine = (Coroutine*) tss_get(_tssRunning);
       coroutineTssPush(&_tssRunning, targetCoroutine);
     }
 #else
@@ -389,7 +401,7 @@ void* coroutineResume(Coroutine *targetCoroutine, void *arg) {
 /// for this coroutine.
 void* coroutineYield(void *arg) {
   void *returnValue = NULL;
-  Coroutine* first = &_globalFirst;
+  Coroutine* first = _globalFirst;
 #ifdef THREAD_SAFE_COROUTINES
   if (_coroutineThreadingSupportEnabled) {
     call_once(&_threadMetadataSetup, coroutineSetupThreadMetadata);
@@ -408,6 +420,9 @@ void* coroutineYield(void *arg) {
 #endif
   if (running == first) {
     // Can't yield from the main coroutine.  Return NULL.
+    return NULL;
+  } else if (running == NULL) {
+    // The running stack hasn't been setup yet.  Bail.
     return NULL;
   }
 
@@ -474,13 +489,14 @@ Coroutine* coroutineCreate(void* func(void *arg)) {
     stackSizeK = (int) ((intptr_t) tss_get(_tssStackSizeK));
     idle = (Coroutine*) tss_get(_tssIdle);
     running = (Coroutine*) tss_get(_tssRunning);
-    if (running == NULL) {
-      fprintf(stderr, "ERROR: No first coroutine defined.\n");
-      fprintf(stderr, "       Cannot create coroutine.\n");
-      return NULL;
-    }
   }
 #endif
+
+  if (running == NULL) {
+    fprintf(stderr, "ERROR: No first coroutine defined.\n");
+    fprintf(stderr, "       Cannot create coroutine.\n");
+    return NULL;
+  }
 
   // The current coroutine is at the head of the running list.
   if ((idle == NULL) && (!setjmp(running->context))) {
@@ -702,6 +718,11 @@ int coroutineKill(Coroutine *targetCoroutine, Comutex **mutexes) {
     running = (Coroutine*) tss_get(_tssRunning);
   }
 #endif
+  if (running == NULL) {
+    // running stack hasn't been setup yet.  Bail.
+    return coroutineError;
+  }
+
   Coroutine* prev = NULL;
   for (; running != NULL; running = running->next) {
     if (running == targetCoroutine) {
@@ -799,6 +820,13 @@ int coroutineSetId(Coroutine* coroutine, int64_t id) {
 #endif
     // running should always be non-NULL, so we shouldn't need to check again.
   }
+
+  if (coroutine == NULL) {
+    // Request to set the ID of the currently running Coroutine and there isn't
+    // one.  Bail.
+    return coroutineError;
+  }
+
   coroutine->id = id;
 
   return coroutineSuccess;
@@ -827,6 +855,10 @@ int64_t coroutineId(Coroutine* coroutine) {
     }
 #endif
     // running should always be non-NULL, so we shouldn't need to check again.
+  }
+
+  if (coroutine == NULL) {
+    return COROUTINE_ID_NOT_SET;
   }
 
   return coroutine->id;
@@ -879,13 +911,17 @@ bool coroutineThreadingSupportEnabled() {
 ///
 /// @brief Set the minimum size of a coroutine's stack, in KB.
 ///
-/// @param stackSizeK The desired size of a coroutine's stack, in KB.  The
-///   minimum stack size is always 1 KB irrespective of the value provided.
+/// @param stackSizeK The desired size of a coroutine's stack, in KB.  If this
+///   value is less than 1, COROUTINE_DEFAULT_STACK_SIZE_K will be used.
 /// @param first A pointer to the root Coroutine to use.  This parameter is
 ///   optional but will avoid use of dynamic memory in multithreading configs.
 ///
 /// @return Returns coroutineSuccess on success, coroutineError on error.
 int coroutineConfig(int stackSizeK, Coroutine *first) {
+  if (stackSizeK < 1) {
+    stackSizeK = COROUTINE_DEFAULT_STACK_SIZE_K;
+  }
+
   Coroutine* idle = _globalIdle;
 #ifdef THREAD_SAFE_COROUTINES
   if (_coroutineThreadingSupportEnabled) {
@@ -908,17 +944,19 @@ int coroutineConfig(int stackSizeK, Coroutine *first) {
     if (tss_get(_tssFirst) != NULL) {
       // croutineConfig weas already called once.  Everything has already been
       // configured, so we just need to reset _tssFirst and _tssRunning.
-      int status = tss_set(_tssFirst, first);
-      if (status != thrd_success) {
-        fprintf(stderr,
-          "Could not set _tssFirst to first in coroutineConfig.\n");
-        return coroutineError;
-      }
-      status = tss_set(_tssRunning, first);
-      if (status != thrd_success) {
-        fprintf(stderr,
-          "Could not set _tssRunning to first in coroutineConfig.\n");
-        return coroutineError;
+      if (first != NULL) {
+        int status = tss_set(_tssFirst, first);
+        if (status != thrd_success) {
+          fprintf(stderr,
+            "Could not set _tssFirst to first in coroutineConfig.\n");
+          return coroutineError;
+        }
+        status = tss_set(_tssRunning, first);
+        if (status != thrd_success) {
+          fprintf(stderr,
+            "Could not set _tssRunning to first in coroutineConfig.\n");
+          return coroutineError;
+        }
       }
     } else if (!coroutineInitializeThreadMetadata(first)) {
       fprintf(stderr,
@@ -928,11 +966,16 @@ int coroutineConfig(int stackSizeK, Coroutine *first) {
     tss_set(_tssStackSizeK, (void*) ((intptr_t) stackSizeK));
   }
 #endif // THREAD_SAFE_COROUTINES
-  _globalStackSizeK = stackSizeK;
   if (first != NULL) {
     memset(first, 0, sizeof(Coroutine));
+    _globalFirst = first;
     _globalRunning = first;
+  } else if (_globalFirst == NULL) {
+    fprintf(stderr,
+      "NULL first Coroutine provided and no first Coroutine set.\n");
+    return coroutineError;
   }
+  _globalStackSizeK = stackSizeK;
 
   return coroutineSuccess;
 }
@@ -1013,6 +1056,12 @@ int comutexUnlock(Comutex *mtx) {
     running = (Coroutine*) tss_get(_tssRunning);
   }
 #endif
+
+  if (running == NULL) {
+    // running stack not setup yet.  Bail.
+    return coroutineError;
+  }
+
   if ((mtx != NULL) && (mtx->coroutine == running)) {
     mtx->recursionLevel--;
     if (mtx->recursionLevel == 0) {
@@ -1120,6 +1169,12 @@ int comutexTrylock(Comutex *mtx) {
     running = (Coroutine*) tss_get(_tssRunning);
   }
 #endif
+
+  if (running == NULL) {
+    // running stack not setup yet.  Bail.
+    return coroutineError;
+  }
+
   if (mtx->coroutine == NULL) {
     mtx->coroutine = running;
     mtx->recursionLevel = 1;
@@ -1268,9 +1323,14 @@ int conditionTimedwait(Cocondition *cond, Comutex *mtx,
     if (!coroutineInitializeThreadMetadata(NULL)) {
       return coroutineError;
     }
-    running = (Coroutine*)tss_get(_tssRunning);
+    running = (Coroutine*) tss_get(_tssRunning);
   }
 #endif
+
+  if (running == NULL) {
+    // running stack not setup yet.  Bail.
+    return coroutineError;
+  }
 
   // Add ourselves to the queue.
   cond->numWaiters++;
@@ -1372,6 +1432,11 @@ int coconditionWait(Cocondition *cond, Comutex *mtx) {
     running = (Coroutine*) tss_get(_tssRunning);
   }
 #endif
+
+  if (running == NULL) {
+    // running stack not setup yet.  Bail.
+    return coroutineError;
+  }
 
   // Add ourselves to the queue.
   cond->numWaiters++;
