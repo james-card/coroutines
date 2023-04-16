@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //                                                                            //
-//                     Copyright (c) 2012-2021 James Card                     //
+//                     Copyright (c) 2012-2023 James Card                     //
 //                                                                            //
 // Permission is hereby granted, free of charge, to any person obtaining a    //
 // copy of this software and associated documentation files (the "Software"), //
@@ -1651,6 +1651,7 @@ int thrd_join(thrd_t thr, int* res) {
     if (node != attachedThreads->nil) {
         threadHandle = (HANDLE)node->value;
     }
+    mtx_unlock(attachedThreadsMutex);
 
     if (threadHandle != NULL) {
         DWORD waitResult = WaitForSingleObject(
@@ -1664,14 +1665,15 @@ int thrd_join(thrd_t thr, int* res) {
                 returnValue = thrd_error;
             }
         }
+        mtx_lock(attachedThreadsMutex);
         rbTreeDelete(attachedThreads, node);
+        mtx_unlock(attachedThreadsMutex);
         CloseHandle(threadHandle);
     }
     else {
         returnValue = thrd_error;
     }
 
-    mtx_unlock(attachedThreadsMutex);
     return returnValue;
 }
 
@@ -1694,6 +1696,30 @@ int thrd_sleep(const struct timespec* duration, struct timespec* remaining) {
 
 void thrd_yield(void) {
     Sleep(0);
+}
+
+int thrd_terminate(thrd_t thr) {
+    int returnValue = thrd_success;
+    HANDLE threadHandle = NULL;
+    mtx_lock(attachedThreadsMutex);
+
+    RedBlackNode* node = rbTreeExactQuery(attachedThreads, &thr);
+    if (node != attachedThreads->nil) {
+        threadHandle = (HANDLE)node->value;
+    }
+    mtx_unlock(attachedThreadsMutex);
+
+    if (threadHandle != NULL) {
+        BOOL success = TerminateThread(threadHandle, thrd_terminated);
+        if (success == 0) {
+            returnValue = thrd_error;
+        }
+    } else {
+        // Thread not found.
+        returnValue = thrd_error;
+    }
+
+    return returnValue;
 }
 
 /*

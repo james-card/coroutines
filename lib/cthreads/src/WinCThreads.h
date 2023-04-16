@@ -11,7 +11,7 @@
 /// @details
 ///
 /// @copyright
-///                   Copyright (c) 2012-2021 James Card
+///                   Copyright (c) 2012-2023 James Card
 ///
 /// Permission is hereby granted, free of charge, to any person obtaining a
 /// copy of this software and associated documentation files (the "Software"),
@@ -39,11 +39,6 @@
 #ifndef WIN_C_THREADS_H
 #define WIN_C_THREADS_H
 
-#ifdef __cplusplus
-extern "C"
-{
-#endif
-
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include <process.h>
@@ -53,15 +48,11 @@ extern "C"
 #include <stdlib.h>
 #include <stdio.h>
 
-/*
-struct timespec {
-    long tv_sec;
-    long tv_nsec;
-};
-#define TIME_UTC 1
-int timespec_get(struct timespec* spec, int base);
-*/
 
+#ifdef __cplusplus
+extern "C"
+{
+#endif
 
 // Call once support.
 #define ONCE_FLAG_INIT 0
@@ -105,11 +96,12 @@ int cnd_wait(cnd_t* cond, mtx_t* mtx);
 typedef DWORD thrd_t;
 typedef int (*thrd_start_t)(void*);
 
-#define thrd_success  0
-#define thrd_busy     1
-#define thrd_error    2
-#define thrd_nomem    3
-#define thrd_timedout 4
+#define thrd_success    0
+#define thrd_busy       1
+#define thrd_error      2
+#define thrd_nomem      3
+#define thrd_timedout   4
+#define thrd_terminated 5
 
 int thrd_create(thrd_t* thr, thrd_start_t func, void* arg);
 thrd_t thrd_current(void);
@@ -119,6 +111,7 @@ void thrd_exit(int res);
 int thrd_join(thrd_t thr, int* res);
 int thrd_sleep(const struct timespec* duration, struct timespec* remaining);
 void thrd_yield(void);
+int thrd_terminate(thrd_t thr);
 
 
 // Thread-specific storage support.

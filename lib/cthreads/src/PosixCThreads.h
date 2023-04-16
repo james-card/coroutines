@@ -12,7 +12,7 @@
 /// @details
 ///
 /// @copyright
-///                   Copyright (c) 2012-2021 James Card
+///                   Copyright (c) 2012-2023 James Card
 ///
 /// Permission is hereby granted, free of charge, to any person obtaining a
 /// copy of this software and associated documentation files (the "Software"),
@@ -40,11 +40,6 @@
 #ifndef POSIX_C_THREADS_H
 #define POSIX_C_THREADS_H
 
-#ifdef __cplusplus
-extern "C"
-{
-#endif
-
 #include <unistd.h>
 #include <pthread.h>
 #include <time.h>
@@ -52,6 +47,11 @@ extern "C"
 #include <string.h>
 #include <errno.h>
 
+
+#ifdef __cplusplus
+extern "C"
+{
+#endif
 
 #ifdef _WIN32 // MINGW system
 #define localtime_r(timetP, nowStructP) do { \
@@ -98,11 +98,12 @@ int cnd_wait(cnd_t *cond, mtx_t *mtx);
 typedef pthread_t thrd_t;
 typedef int (*thrd_start_t)(void*);
 
-#define thrd_success  0
-#define thrd_busy     1
-#define thrd_error    2
-#define thrd_nomem    3
-#define thrd_timedout 4
+#define thrd_success    0
+#define thrd_busy       1
+#define thrd_error      2
+#define thrd_nomem      3
+#define thrd_timedout   4
+#define thrd_terminated PTHREAD_CANCELED
 
 int thrd_create(thrd_t *thr, thrd_start_t func, void *arg);
 #define thrd_current pthread_self
@@ -112,6 +113,7 @@ int thrd_create(thrd_t *thr, thrd_start_t func, void *arg);
 int thrd_join(thrd_t thr, int *res);
 #define thrd_sleep nanosleep
 #define thrd_yield sched_yield
+#define thrd_terminate pthread_cancel
 
 
 // Thread-specific storage support.
@@ -126,12 +128,6 @@ int tss_create(tss_t *key, tss_dtor_t dtor);
 int tss_set(tss_t key, void *val);
 
 
-/*
-struct timespec {
-  long tv_sec;
-  long tv_nsec;
-};
-*/
 #define TIME_UTC 1
 int timespec_get(struct timespec* spec, int base);
 
