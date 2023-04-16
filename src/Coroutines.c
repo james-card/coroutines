@@ -687,7 +687,7 @@ void coroutineMain(void *stack) {
   }
 }
 
-/// @fn int coroutineKill(Coroutine *targetCoroutine, Comutex **mutexes)
+/// @fn int coroutineTerminate(Coroutine *targetCoroutine, Comutex **mutexes)
 ///
 /// @brief Kill a coroutine that's currently in progresss.
 ///
@@ -700,7 +700,7 @@ void coroutineMain(void *stack) {
 /// there's no need to pass in Coconditions to check.
 ///
 /// @return Returns coroutineSuccess on success, coroutineError on error.
-int coroutineKill(Coroutine *targetCoroutine, Comutex **mutexes) {
+int coroutineTerminate(Coroutine *targetCoroutine, Comutex **mutexes) {
   if (targetCoroutine == NULL) {
     return coroutineError;
   }

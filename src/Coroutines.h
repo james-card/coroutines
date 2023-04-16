@@ -44,16 +44,16 @@
 #ifndef COROUTINES_H
 #define COROUTINES_H
 
-#ifdef __cplusplus
-extern "C"
-{
-#endif
-
 #include <setjmp.h>
 #include <stdlib.h>
 #include <stdbool.h>
 #include <time.h>
 #include <stdint.h>
+
+#ifdef __cplusplus
+extern "C"
+{
+#endif
 
 #if !defined(SINGLE_CORE_COROUTINES) && !defined(THREAD_SAFE_COROUTINES)
 #define THREAD_SAFE_COROUTINES
@@ -256,7 +256,7 @@ int coconditionWait(Cocondition *cond, Comutex *mtx);
 void* coconditionLastYieldValue(Cocondition *cond);
 
 
-int coroutineKill(Coroutine *targetCoroutine, Comutex **mutexes);
+int coroutineTerminate(Coroutine *targetCoroutine, Comutex **mutexes);
 
 #ifdef __cplusplus
 } // extern "C"
