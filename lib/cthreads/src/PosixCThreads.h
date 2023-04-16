@@ -103,7 +103,7 @@ typedef int (*thrd_start_t)(void*);
 #define thrd_error      2
 #define thrd_nomem      3
 #define thrd_timedout   4
-#define thrd_terminated PTHREAD_CANCELED
+#define thrd_terminated ((int) ((intptr_t) PTHREAD_CANCELED))
 
 int thrd_create(thrd_t *thr, thrd_start_t func, void *arg);
 #define thrd_current pthread_self

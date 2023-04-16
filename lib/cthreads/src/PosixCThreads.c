@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //                                                                            //
-//                     Copyright (c) 2012-2021 James Card                     //
+//                     Copyright (c) 2012-2023 James Card                     //
 //                                                                            //
 // Permission is hereby granted, free of charge, to any person obtaining a    //
 // copy of this software and associated documentation files (the "Software"), //
@@ -28,10 +28,6 @@
 // Doxygen marker
 /// @file
 
-/*
-#if ((__STDC_VERSION__) && (__STDC_VERSION__ < 201710L)) \
-  || (__STDC_NO_THREADS__) || ((__cplusplus) && (__cplusplus < 201402L))
-*/
 #ifndef _MSC_VER
 #include "PosixCThreads.h"
 #include <stdlib.h>
@@ -154,6 +150,9 @@ typedef struct PthreadCreateWrapperArgs {
 } PthreadCreateWrapperArgs;
 
 void *pthread_create_wrapper(void* wrapper_args) {
+  // We want to be able to kill this thread if we need to.
+  pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
+  
   PthreadCreateWrapperArgs *cthread_args
     = (PthreadCreateWrapperArgs*) wrapper_args;
   thrd_start_t func = cthread_args->func;
@@ -173,6 +172,7 @@ void *pthread_create_wrapper(void* wrapper_args) {
 
 int thrd_create(thrd_t *thr, thrd_start_t func, void *arg) {
   int returnValue = thrd_success;
+  
   PthreadCreateWrapperArgs *wrapper_args
     = (PthreadCreateWrapperArgs*) malloc(sizeof(PthreadCreateWrapperArgs));
   if (wrapper_args == NULL) {
@@ -299,6 +299,5 @@ int cnd_wait(cnd_t *cond, mtx_t *mtx) {
   return returnValue;
 }
 
-#endif // ((__STDC_VERSION__) && (__STDC_VERSION__ < 201710L))
-  // || (__STDC_NO_THREADS__) || ((__cplusplus) && (__cplusplus < 201402L))
+#endif // _MSC_VER
 
