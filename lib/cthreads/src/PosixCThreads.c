@@ -30,6 +30,7 @@
 
 #ifndef _MSC_VER
 #include "PosixCThreads.h"
+#include <stdio.h>
 #include <stdlib.h>
 
 #ifdef __cplusplus
@@ -44,13 +45,39 @@ int mtx_init(mtx_t *mtx, int type) {
   if ((type & mtx_recursive) != 0) {
     pthread_mutexattr_t attribs;
     memset(&attribs, 0, sizeof(attribs));
-    pthread_mutexattr_settype(&attribs, PTHREAD_MUTEX_RECURSIVE);
+    int err = pthread_mutexattr_init(&attribs);
+    if (err != 0) {
+      fputs("pthread_mutexattr_init: ", stderr);
+      fputs(strerror(err), stderr);
+      fputs("\n", stderr);
+      returnValue = thrd_error;
+      return returnValue;
+    }
+    err = pthread_mutexattr_settype(&attribs, PTHREAD_MUTEX_RECURSIVE);
+    if (err != 0) {
+      fputs("pthread_mutexattr_settype: ", stderr);
+      fputs(strerror(err), stderr);
+      fputs("\n", stderr);
+      returnValue = thrd_error;
+      return returnValue;
+    }
+    
     returnValue = pthread_mutex_init(mtx, &attribs);
+    
+    err = pthread_mutexattr_destroy(&attribs);
+    if (err != 0) {
+      fputs("pthread_mutexattr_destroy: ", stderr);
+      fputs(strerror(err), stderr);
+      fputs("\n", stderr);
+    }
   } else {
      returnValue = pthread_mutex_init(mtx, NULL);
   }
   
   if (returnValue != 0) {
+    fputs("pthread_mutex_init: ", stderr);
+    fputs(strerror(returnValue), stderr);
+    fputs("\n", stderr);
     returnValue = thrd_error;
   }
   
@@ -60,6 +87,7 @@ int mtx_init(mtx_t *mtx, int type) {
 int mtx_timedlock(mtx_t* mtx, const struct timespec* ts) {
   int returnValue = thrd_success;
   
+#ifdef _GNU_SOURCE
   returnValue = pthread_mutex_timedlock(mtx, ts);
   
   if (returnValue == ETIMEDOUT) {
@@ -67,6 +95,26 @@ int mtx_timedlock(mtx_t* mtx, const struct timespec* ts) {
   } else if (returnValue != 0) {
     returnValue = thrd_error;
   }
+#else
+  // We're on some POSIX system but we're not compiling with gcc.  We can't rely
+  // on pthread_mutex_timedlock being implemented, so we're going to have to do
+  // a hack.
+  struct timespec nowTimespec;
+  timespec_get(&nowTimespec, TIME_UTC);
+  long long int now64
+    = (nowTimespec.tv_sec * 1000000000) + nowTimespec.tv_nsec;
+  long long int ts64 = (ts->tv_sec * 1000000000) + ts->tv_nsec;
+  returnValue = mtx_trylock(mtx);
+  while ((returnValue == thrd_busy) && (now64 < ts64)) {
+    timespec_get(&nowTimespec, TIME_UTC);
+    now64 = (nowTimespec.tv_sec * 1000000000) + nowTimespec.tv_nsec;
+    returnValue = mtx_trylock(mtx);
+  }
+  
+  if (returnValue == thrd_busy) {
+    returnValue = thrd_timedout;
+  }
+#endif
   
   return returnValue;
 }
