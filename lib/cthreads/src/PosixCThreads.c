@@ -1,6 +1,6 @@
 ////////////////////////////////////////////////////////////////////////////////
 //                                                                            //
-//                     Copyright (c) 2012-2023 James Card                     //
+//                     Copyright (c) 2012-2024 James Card                     //
 //                                                                            //
 // Permission is hereby granted, free of charge, to any person obtaining a    //
 // copy of this software and associated documentation files (the "Software"), //
@@ -38,6 +38,10 @@
 #else // __cplusplus not defined
 #define ZEROINIT(x) x = {0}
 #endif // __cplusplus
+
+void call_once(once_flag* flag, void(*func)(void)) {
+  pthread_once(flag, func);
+}
 
 int mtx_init(mtx_t *mtx, int type) {
   int returnValue = thrd_success;
@@ -157,6 +161,10 @@ int mtx_unlock(mtx_t *mtx) {
   return returnValue;
 }
 
+void mtx_destroy(mtx_t* mtx) {
+  pthread_mutex_destroy(mtx);
+}
+
 #ifndef _WIN32
 int timespec_get(struct timespec* spec, int base) {
   clock_gettime(CLOCK_REALTIME, spec);
@@ -241,6 +249,30 @@ int thrd_create(thrd_t *thr, thrd_start_t func, void *arg) {
   return returnValue;
 }
 
+thrd_t thrd_current(void) {
+  return pthread_self();
+}
+
+int thrd_detach(thrd_t thr) {
+  int returnValue = thrd_success;
+  
+  returnValue = pthread_detach(thr);
+  
+  if (returnValue != 0) {
+    returnValue = thrd_error;
+  }
+  
+  return returnValue;
+}
+
+int thrd_equal(thrd_t thr0, thrd_t thr1) {
+  return pthread_equal(thr0, thr1);
+}
+
+void thrd_exit(int res) {
+  pthread_exit((void*) ((intptr_t) res));
+}
+
 int thrd_join(thrd_t thr, int *res) {
   int returnValue = thrd_success;
   intptr_t threadReturnValue = 0;
@@ -261,6 +293,26 @@ int thrd_join(thrd_t thr, int *res) {
   return returnValue;
 }
 
+int thrd_sleep(const struct timespec* duration, struct timespec* remaining) {
+  return nanosleep(duration, remaining);
+}
+
+void thrd_yield(void) {
+  sched_yield();
+}
+
+int thrd_terminate(thrd_t thr) {
+  int returnValue = thrd_success;
+  
+  returnValue = pthread_cancel(thr);
+  
+  if (returnValue != 0) {
+    returnValue = thrd_error;
+  }
+  
+  return returnValue;
+}
+
 int tss_create(tss_t *key, tss_dtor_t dtor) {
   int returnValue = thrd_success;
   
@@ -271,6 +323,14 @@ int tss_create(tss_t *key, tss_dtor_t dtor) {
   }
   
   return returnValue;
+}
+
+void tss_delete(tss_t key) {
+  pthread_key_delete(key);
+}
+
+void* tss_get(tss_t key) {
+  return pthread_getspecific(key);
 }
 
 int tss_set(tss_t key, void *val) {
@@ -295,6 +355,10 @@ int cnd_broadcast(cnd_t *cond) {
   }
   
   return returnValue;
+}
+
+void cnd_destroy(cnd_t* cond) {
+  pthread_cond_destroy(cond);
 }
 
 int cnd_init(cnd_t *cond) {

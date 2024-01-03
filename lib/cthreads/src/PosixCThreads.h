@@ -12,7 +12,7 @@
 /// @details
 ///
 /// @copyright
-///                   Copyright (c) 2012-2023 James Card
+///                   Copyright (c) 2012-2024 James Card
 ///
 /// Permission is hereby granted, free of charge, to any person obtaining a
 /// copy of this software and associated documentation files (the "Software"),
@@ -65,7 +65,7 @@ extern "C"
 
 typedef pthread_once_t once_flag;
 
-#define call_once pthread_once
+void call_once(once_flag* flag, void(*func)(void));
 
 
 // Mutex support.
@@ -78,7 +78,7 @@ typedef pthread_mutex_t mtx_t;
 int mtx_init(mtx_t *mtx, int type);
 int mtx_lock(mtx_t *mtx);
 int mtx_unlock(mtx_t *mtx);
-#define mtx_destroy pthread_mutex_destroy
+void mtx_destroy(mtx_t* mtx);
 int mtx_timedlock(mtx_t* mtx, const struct timespec* ts);
 int mtx_trylock(mtx_t *mtx);
 
@@ -87,7 +87,7 @@ int mtx_trylock(mtx_t *mtx);
 typedef pthread_cond_t cnd_t;
 
 int cnd_broadcast(cnd_t *cond);
-#define cnd_destroy pthread_cond_destroy
+void cnd_destroy(cnd_t* cond);
 int cnd_init(cnd_t *cond);
 int cnd_signal(cnd_t *cond);
 int cnd_timedwait(cnd_t * cond, mtx_t * mtx, const struct timespec * ts);
@@ -106,14 +106,14 @@ typedef int (*thrd_start_t)(void*);
 #define thrd_terminated ((int) ((intptr_t) PTHREAD_CANCELED))
 
 int thrd_create(thrd_t *thr, thrd_start_t func, void *arg);
-#define thrd_current pthread_self
-#define thrd_detach pthread_detach
-#define thrd_equal pthread_equal
-#define thrd_exit(res) pthread_exit((void*) ((intptr_t) res))
+thrd_t thrd_current(void);
+int thrd_detach(thrd_t thr);
+int thrd_equal(thrd_t thr0, thrd_t thr1);
+void thrd_exit(int res);
 int thrd_join(thrd_t thr, int *res);
-#define thrd_sleep nanosleep
-#define thrd_yield sched_yield
-#define thrd_terminate pthread_cancel
+int thrd_sleep(const struct timespec* duration, struct timespec* remaining);
+void thrd_yield(void);
+int thrd_terminate(thrd_t thr);
 
 
 // Thread-specific storage support.
@@ -123,8 +123,8 @@ typedef void (*tss_dtor_t)(void*);
 typedef pthread_key_t tss_t;
 
 int tss_create(tss_t *key, tss_dtor_t dtor);
-#define tss_delete pthread_key_delete
-#define tss_get pthread_getspecific
+void tss_delete(tss_t key);
+void* tss_get(tss_t key);
 int tss_set(tss_t key, void *val);
 
 
