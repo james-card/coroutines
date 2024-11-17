@@ -171,6 +171,8 @@ int timespec_get(struct timespec* spec, int base) {
   return base;
 }
 #else // We're in MinGW and need to supply a Windows method.
+#include <sysinfoapi.h>
+
 /// @fn int timespec_get(struct timespec* spec, int base)
 ///
 /// @brief Get the system time in seconds and nanoseconds.
@@ -205,7 +207,7 @@ typedef struct PthreadCreateWrapperArgs {
   void *arg;
 } PthreadCreateWrapperArgs;
 
-void *pthread_create_wrapper(void* wrapper_args) {
+void *posix_c_threads_create_wrapper(void* wrapper_args) {
   // We want to be able to kill this thread if we need to.
   pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
   
@@ -239,7 +241,7 @@ int thrd_create(thrd_t *thr, thrd_start_t func, void *arg) {
   wrapper_args->arg = arg;
   
   returnValue = pthread_create(thr, NULL,
-    pthread_create_wrapper, wrapper_args);
+    posix_c_threads_create_wrapper, wrapper_args);
   
   if (returnValue != 0) {
     returnValue = thrd_error;

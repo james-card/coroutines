@@ -58,6 +58,10 @@ extern "C"
   time_t time_tNow = *(timetP); \
   (*(nowStructP)) = *localtime(&time_tNow); \
 } while(0)
+#define gmtime_r(timetP, nowStructP) do { \
+  time_t time_tNow = *(timetP); \
+  (*(nowStructP)) = *gmtime(&time_tNow); \
+} while(0)
 #endif
 
 // Call once support.

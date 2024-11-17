@@ -42,11 +42,11 @@
 #define C_THREADS_H
 
 // Figure out how to support threading.
-#ifdef _MSC_VER
+#ifdef _WIN32
 // Windows system.
 #include "WinCThreads.h"
 #else
-// Non-Visual Studio.  Assume POSIX (pthreads).
+// Non-Windows.  Assume POSIX (pthreads).
 #include "PosixCThreads.h"
 #endif // threading support
 

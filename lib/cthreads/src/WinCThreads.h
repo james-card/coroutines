@@ -40,13 +40,15 @@
 #define WIN_C_THREADS_H
 
 #define WIN32_LEAN_AND_MEAN
-#include <Windows.h>
+#include <windows.h>
 #include <process.h>
 #include <time.h>
 #define localtime_r(timep, result) localtime_s(result, timep)
+#define gmtime_r(timep, result) gmtime_s(result, timep)
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdbool.h>
 
 
 #ifdef __cplusplus
@@ -55,9 +57,10 @@ extern "C"
 #endif
 
 // Call once support.
-#define ONCE_FLAG_INIT 0
-
-typedef int once_flag;
+typedef LONG once_flag;
+#define ONCE_FLAG_INIT     0
+#define ONCE_FLAG_RUNNING  1
+#define ONCE_FLAG_COMPLETE 2
 
 void call_once(once_flag* flag, void(*func)(void));
 
@@ -67,6 +70,7 @@ typedef struct mtx_t {
     int attribs;
     HANDLE handle;
     CRITICAL_SECTION criticalSection;
+    bool initialized;
 } mtx_t;
 
 #define mtx_plain     0
@@ -118,13 +122,19 @@ int thrd_terminate(thrd_t thr);
 #define TSS_DTOR_ITERATIONS 4
 
 typedef void (*tss_dtor_t)(void*);
-typedef uint32_t tss_t; // a complete object type that holds an identifier for a thread-specific storage pointer
+// A tss_t value is a complete object type that holds an identifier for a
+// thread-specific storage pointer.
+typedef uint16_t tss_t; 
 
 int tss_create(tss_t* key, tss_dtor_t dtor);
 void tss_delete(tss_t key);
 void* tss_get(tss_t key);
 int tss_set(tss_t key, void* val);
 
+#ifndef TIME_UTC
+#define TIME_UTC 0
+#endif
+int timespec_get(struct timespec* spec, int base);
 
 #ifdef __cplusplus
 } // extern "C"
