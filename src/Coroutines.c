@@ -25,6 +25,105 @@
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
+/*
+ * Some notes about the way(s) this library works.
+ *
+ * Tony Finch is an extremely clever programmer and I am forever indebted to
+ * him for his initial work on this.  His approach to this is, in my opinion,
+ * sheer genius.  It is, however, not straightforward and requires some
+ * explanation.
+ *
+ * This approach makes use of two stacks:  A stack of running coroutines and a
+ * stack of idle coroutines.  Prior to coroutineConfig being called, both stacks
+ * are empty.  coroutineConfig initializes the running stack to the Coroutine
+ * passed in and sets the stack size that is to be used, but leaves the idle
+ * stack alone.  The idle stack is not modified until the first call to
+ * coroutineCreate is made.  From that point on, there is always at least one
+ * Coroutine on the idle stack.
+ *
+ * When coroutineCreate is called, it first checks the idle stack to see if
+ * there is anything available.  The only time there won't be anything available
+ * is on the first time this function is called (per thread).  If nothing is
+ * available, coroutineAllocateStack is called with the stack size that was
+ * provided to coroutineConfig.  This will allocate the remainder of the stack
+ * for the main function, allocate a Coroutine structure, push a pointer to it
+ * onto the idle stack, and then resume execution in coroutineCreate.  If a
+ * Coroutine is available when coroutineCreate does its check, it simply pops
+ * the stack.
+ *
+ * Once coroutineCreate has an idle Coroutine, it pushes the Coroutine onto the
+ * running stack and then passes it the function pointer it was provided.  This
+ * resumes execution in the coroutineMain function.  There are two possible
+ * places in coroutineMain where execution may resume.  If the Coroutine that
+ * was pulled from the idle stack had been used previously and completed, then
+ * execution resumes at the end of the main while loop where the function is
+ * picked up as the value returned from its yield call.  However, if this is the
+ * Coroutine that was last created, then its point of entry will be near the
+ * beginning of coroutineMain.
+ *
+ * In the former case, coroutineMain just yields back to the calling Coroutine
+ * and waits for its arguments to be provided by coroutineResume.  In the latter
+ * case, things aren't so simple.  In this case, the provided function pointer
+ * is stored and then coroutineAllocateStack is called again to allocate another
+ * Coroutine.  As before, this coroutine is pushed onto the idle stack, however
+ * when it does a longjmp this time, execution is not resumed in the
+ * coroutineCreate constructor but in the previous-level coroutineMain call.
+ * This then enters the main while loop which yields control back to the calling
+ * coroutine and waits for its arguments to be provided (just as in the former
+ * case above).
+ *
+ * From this point onward, passing control between coroutines is done by a
+ * running coroutine calling coroutineYield to yield control back to its caller
+ * and a calling function calling coroutineResume to resume execution in the
+ * called coroutine from the point at which the coroutine made its last
+ * coroutineYield call (or from the beginning of the function if the funcion has
+ * not yet begun execution).
+ *
+ * coroutineCreate, coroutineMain, coroutineResume, and coroutineYield make use
+ * of an internal function called coroutinePass and/or raw setjmp and longjmp
+ * function calls.  coroutinePass also makes use of setjmp and longjmp.
+ * coroutinePass takes as parameters a pointer to the Coroutine making the call
+ * and the value that is to be passed to the Coroutine whose execution is
+ * resumed.  Execution will be passed to the Coroutine that is at the top of the
+ * running stack.  It is the responsibility of the caller to ensure that the
+ * running stack is setup correctly before calling coroutinePass.
+ *
+ * The second parameter of coroutinePass is a CoroutineFuncData union.  This is
+ * a union of a data pointer and a function pointer.  The reason for this union
+ * is that both function pointers and data pointers have to be passed through
+ * coroutinePass, however the C standard forbids casting function pointers to
+ * data pointers and vice-versa.  So, we need a union in order to be compliant
+ * with the specification.  It is the responsibility of the caller to know which
+ * kind of value to provide and which kind of value to expect.  Note that
+ * coroutineResume and coroutineYield only deal with data pointers, so the
+ * function pointer use case can only be exercised by functions within this
+ * library (because coroutinePass is not an externally-visible function).  This
+ * is deliberate and this is what is desirable.
+ *
+ * Some implications and limitations...
+ *
+ * The fact that there is always at least one Coroutine on the idle stack has
+ * some implications for memory-constrained environments.  The first time that
+ * coroutineCreate is called, the upper limit for the calling function's stack
+ * -AND- the stack for the created Coroutine are both allocated.  Allocation
+ * is achieved by recursively calling a function with a character buffer, which
+ * means that the memory in those stacks will be touched during this process.
+ * Effectively, the first time that coroutineCreate is called, a little over 2X
+ * the stack size provided to coroutineConfig is touched.  This can result in
+ * a nasty surprise (i.e. a crash) in severly memory-constrained environments.
+ *
+ * One requirement of this system is that all the stacks must be the same size.
+ * The stack size provided to coroutineConfig cannot be changed once the first
+ * Coroutine has been created with coroutineCreate.  This is because the size
+ * of a stack for a Coroutine is actually provided to coroutineAllocateStack on
+ * the call prior to the call that returns a usable Coroutine.  It would be very
+ * difficult (and highly confusing) to try and adjust the size dynamically.  To
+ * save us all any more confusion than this system already causes, all stacks on
+ * a single thread must be the same size.
+ *
+ * JBC 2024-11-18
+ */
+
 // Doxygen marker
 /// @file
 
@@ -38,8 +137,8 @@
 #include <stdio.h> // For error messages
 
 // Prototype forward declarations for mutual recursion.
-void coroutineAllocateStack(int stackSizeK);
-void coroutineMain(void*);
+void coroutineAllocateStack(int stackSize, void *topOfStack);
+void coroutineMain(void *stack);
 
 /// @def ZEROINIT
 ///
@@ -82,10 +181,10 @@ static Coroutine* _globalRunning = NULL;
 /// a new idle coroutine.
 static Coroutine* _globalIdle = NULL;
 
-/// @var static int _globalStackSizeK
+/// @var static int _globalStackSize
 ///
-/// @brief The size of each coroutine's stack in KB.
-static int _globalStackSizeK = 16;
+/// @brief The size of each coroutine's stack in bytes.
+static int _globalStackSize = COROUTINE_DEFAULT_STACK_SIZE;
 
 /// @fn void coroutineGlobalPush(Coroutine **list, Coroutine *coroutine)
 ///
@@ -157,10 +256,10 @@ ZEROINIT(static tss_t _tssRunning);
 /// a new idle coroutine.
 ZEROINIT(static tss_t _tssIdle);
 
-/// @var static tss_t _tssStackSizeK
+/// @var static tss_t _tssStackSize
 ///
-/// @brief Thread-specific size of each coroutine's stack, in KB.
-ZEROINIT(static tss_t _tssStackSizeK);
+/// @brief Thread-specific size of each coroutine's stack, in bytes.
+ZEROINIT(static tss_t _tssStackSize);
 
 /// @var static once_flag _threadMetadataSetup
 ///
@@ -190,9 +289,9 @@ void coroutineSetupThreadMetadata(void) {
   if (status != thrd_success) {
     fprintf(stderr, "Could not initialize _tssIdle.\n");
   }
-  status = tss_create(&_tssStackSizeK, NULL);
+  status = tss_create(&_tssStackSize, NULL);
   if (status != thrd_success) {
-    fprintf(stderr, "Could not initialize _tssStackSizeK.\n");
+    fprintf(stderr, "Could not initialize _tssStackSize.\n");
   }
 }
 
@@ -238,11 +337,11 @@ bool coroutineInitializeThreadMetadata(Coroutine *first) {
       "Could not set _tssIdle to NULL in coroutineInitializeThreadMetadata.\n");
     return false;
   }
-  status = tss_set(_tssStackSizeK, (void*) ((intptr_t) _globalStackSizeK));
+  status = tss_set(_tssStackSize, (void*) ((intptr_t) _globalStackSize));
   if (status != thrd_success) {
     fprintf(stderr,
-      "Could not set _tssStackSizeK to %d in "
-      "coroutineInitializeThreadMetadata.\n", _globalStackSizeK);
+      "Could not set _tssStackSize to %d in "
+      "coroutineInitializeThreadMetadata.\n", _globalStackSize);
     return false;
   }
 
@@ -286,7 +385,7 @@ Coroutine* coroutineTssPop(tss_t* list) {
 
 #endif // THREAD_SAFE_COROUTINES
 
-/// @fn void* coroutinePass(Coroutine currentCoroutine, void *arg)
+/// @fn void* coroutinePass(Coroutine currentCoroutine, CoroutineFuncData arg)
 ///
 /// @brief Pass a value and control from one coroutine to another.  The target
 /// coroutine is at the head of the "running" list.
@@ -296,6 +395,8 @@ Coroutine* coroutineTssPop(tss_t* list) {
 ///
 /// @return Returns the target's returned or yielded value.
 CoroutineFuncData coroutinePass(Coroutine *currentCoroutine, CoroutineFuncData arg) {
+  ZEROINIT(CoroutineFuncData returnValue);
+  
   if (currentCoroutine != NULL) {
     if (!setjmp(currentCoroutine->context)) {
 #ifdef THREAD_SAFE_COROUTINES
@@ -325,10 +426,10 @@ CoroutineFuncData coroutinePass(Coroutine *currentCoroutine, CoroutineFuncData a
       }
     }
   } else {
-    currentCoroutine->passed.data = NULL;
+    return returnValue; // NULL return value.
   }
 
-  CoroutineFuncData returnValue = currentCoroutine->passed;
+  returnValue = currentCoroutine->passed;
   return returnValue;
 }
 
@@ -479,14 +580,14 @@ Coroutine* coroutineCreate(void* func(void *arg)) {
 
   Coroutine* idle = _globalIdle;
   Coroutine* running = _globalRunning;
-  int stackSizeK = _globalStackSizeK;
+  int stackSize = _globalStackSize;
 #ifdef THREAD_SAFE_COROUTINES
   if (_coroutineThreadingSupportEnabled) {
     call_once(&_threadMetadataSetup, coroutineSetupThreadMetadata);
     if (!coroutineInitializeThreadMetadata(NULL)) {
       return NULL;
     }
-    stackSizeK = (int) ((intptr_t) tss_get(_tssStackSizeK));
+    stackSize = (int) ((intptr_t) tss_get(_tssStackSize));
     idle = (Coroutine*) tss_get(_tssIdle);
     running = (Coroutine*) tss_get(_tssRunning);
   }
@@ -502,7 +603,7 @@ Coroutine* coroutineCreate(void* func(void *arg)) {
   if ((idle == NULL) && (!setjmp(running->context))) {
     // We've just been called from the calling function and need to create a
     // new Coroutine instance, including its stack.
-    coroutineAllocateStack(stackSizeK);
+    coroutineAllocateStack(stackSize, NULL);
   }
   // Either there was an idle coroutine on the idle list or we just returned
   // from coroutineMain (called by coroutineAllocateStack).  Either way, the Coroutine
@@ -551,7 +652,7 @@ Coroutine* coroutineCreate(void* func(void *arg)) {
   return newCoroutine;
 }
 
-/// void coroutineMain(void *ret)
+/// void coroutineMain(void *stack)
 ///
 /// @brief The main loop responsible for managing the "idle" list.
 ///
@@ -620,16 +721,16 @@ void coroutineMain(void *stack) {
   // we're about to set is for ourself.  The call to coroutineAllocateStack here
   // will allocate the next Coroutine on the idle list to be used in the next
   // call to the constructor.
-  Coroutine* running = _globalRunning;
-  int stackSizeK = _globalStackSizeK;
+  Coroutine *running = _globalRunning;
+  int stackSize = _globalStackSize;
 #ifdef THREAD_SAFE_COROUTINES
   if (_coroutineThreadingSupportEnabled) {
     running = (Coroutine*) tss_get(_tssRunning);
-    stackSizeK = (int) ((intptr_t) tss_get(_tssStackSizeK));
+    stackSize = (int) ((intptr_t) tss_get(_tssStackSize));
   }
 #endif
   if (!setjmp(running->context)) {
-    coroutineAllocateStack(stackSizeK);
+    coroutineAllocateStack(stackSize, NULL);
   }
 
   if (setjmp(running->resetContext)) {
@@ -639,6 +740,7 @@ void coroutineMain(void *stack) {
     // constructor will be thinking that it just provided us with the function
     // we should call.
     funcData = running->passed;
+    func = funcData.func;
   }
 
   // We have just been passed execution from the coroutinePass() statement
@@ -685,6 +787,26 @@ void coroutineMain(void *stack) {
     funcData = coroutinePass(&me, funcData);
     func = funcData.func;
   }
+}
+
+/// void coroutineAllocateStack(int stackSize, void *topOfStack)
+///
+/// @brief Allocate space for the current stack to grow before creating the
+/// initial stack frame for the next coroutine.
+///
+/// @return This function returns no value.
+void coroutineAllocateStack(int stackSize, void *topOfStack) {
+  ZEROINIT(char stack[COROUTINE_STACK_CHUNK_SIZE]);
+  
+  if (topOfStack == NULL) {
+    topOfStack = stack;
+  }
+  
+  if (stackSize > COROUTINE_STACK_CHUNK_SIZE) {
+    coroutineAllocateStack(stackSize - COROUTINE_STACK_CHUNK_SIZE, topOfStack);
+  }
+  
+  coroutineMain(topOfStack);
 }
 
 /// @fn int coroutineTerminate(Coroutine *targetCoroutine, Comutex **mutexes)
@@ -780,21 +902,6 @@ int coroutineTerminate(Coroutine *targetCoroutine, Comutex **mutexes) {
   }
 
   return coroutineSuccess;
-}
-
-/// void coroutineAllocateStack(int stackSizeK)
-///
-/// @brief Allocate space for the current stack to grow before creating the
-/// initial stack frame for the next coroutine.
-///
-/// @return This function returns no value.
-void coroutineAllocateStack(int stackSizeK) {
-  ZEROINIT(char stack[1024]); // 1 KB
-  if (stackSizeK > 1) {
-    coroutineAllocateStack(stackSizeK - 1);
-  }
-  
-  coroutineMain(stack);
 }
 
 /// @fn int coroutineSetId(Coroutine* coroutine, int64_t id)
@@ -907,19 +1014,20 @@ bool coroutineThreadingSupportEnabled() {
 
 #endif // THREAD_SAFE_COROUTINES
 
-/// @fn int coroutineConfig(int stackSizeK, Coroutine *first)
+/// @fn int coroutineConfig(Coroutine *first, int stackSize)
 ///
-/// @brief Set the minimum size of a coroutine's stack, in KB.
+/// @brief Configure the global or thread-specific defaults for all coroutines
+/// allocated by the current thread.
 ///
-/// @param stackSizeK The desired size of a coroutine's stack, in KB.  If this
-///   value is less than 1, COROUTINE_DEFAULT_STACK_SIZE_K will be used.
-/// @param first A pointer to the root Coroutine to use.  This parameter is
-///   optional but will avoid use of dynamic memory in multithreading configs.
+/// @param first A pointer to the root Coroutine to use.
+/// @param stackSize The desired minimum size of a coroutine's stack, in bytes.
+///   If this value is less than COROUTINE_STACK_CHUNK_SIZE,
+///   COROUTINE_DEFAULT_STACK_SIZE will be used.
 ///
 /// @return Returns coroutineSuccess on success, coroutineError on error.
-int coroutineConfig(int stackSizeK, Coroutine *first) {
-  if (stackSizeK < 1) {
-    stackSizeK = COROUTINE_DEFAULT_STACK_SIZE_K;
+int coroutineConfig(Coroutine *first, int stackSize) {
+  if (stackSize < COROUTINE_STACK_CHUNK_SIZE) {
+    stackSize = COROUTINE_DEFAULT_STACK_SIZE;
   }
 
   Coroutine* idle = _globalIdle;
@@ -963,7 +1071,7 @@ int coroutineConfig(int stackSizeK, Coroutine *first) {
         "Could not initialize thread metadata in coroutineConfig.\n");
         return coroutineError;
     }
-    tss_set(_tssStackSizeK, (void*) ((intptr_t) stackSizeK));
+    tss_set(_tssStackSize, (void*) ((intptr_t) stackSize));
   }
 #endif // THREAD_SAFE_COROUTINES
   if (first != NULL) {
@@ -975,7 +1083,7 @@ int coroutineConfig(int stackSizeK, Coroutine *first) {
       "NULL first Coroutine provided and no first Coroutine set.\n");
     return coroutineError;
   }
-  _globalStackSizeK = stackSizeK;
+  _globalStackSize = stackSize;
 
   return coroutineSuccess;
 }
@@ -1279,7 +1387,7 @@ int coconditionInit(Cocondition* cond) {
 int coconditionSignal(Cocondition *cond) {
   int returnValue = coroutineSuccess;
 
-  if (cond != NULL) {
+  if ((cond != NULL) && (cond->numWaiters > 0)) {
     cond->numSignals++;
   } else {
     returnValue = coroutineError;

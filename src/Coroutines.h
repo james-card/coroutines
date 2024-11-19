@@ -84,11 +84,17 @@ extern "C"
 /// provided coroutine is blocked within a blocking coroutine operation.
 #define COROUTINE_BLOCKED ((void*) ((intptr_t) -2))
 
-/// @def COROUTINE_DEFAULT_STACK_SIZE_K
+/// @def COROUTINE_STACK_CHUNK_SIZE
 ///
-/// @brief The default size of the stack for a coroutine, in KB.
-#ifndef COROUTINE_DEFAULT_STACK_SIZE_K
-#define COROUTINE_DEFAULT_STACK_SIZE_K 16
+/// @brief The size of a single chunk of the stack allocated by
+/// coroutineAllocateStack.
+#define COROUTINE_STACK_CHUNK_SIZE 512
+
+/// @def COROUTINE_DEFAULT_STACK_SIZE
+///
+/// @brief The default stack size to allocate, in bytes.
+#ifndef COROUTINE_DEFAULT_STACK_SIZE
+#define COROUTINE_DEFAULT_STACK_SIZE 16384
 #endif
 
 /// @def COROUTINE_ID_NOT_SET
@@ -157,7 +163,7 @@ typedef struct Coroutine {
 /// @return Returns false when the coroutine has run to completion or when it is
 /// blocked inside coroutineResume() and true otherwise.
 #define coroutineResumable(coroutinePointer) \
-  ((coroutinePointer != NULL) && (coroutinePointer->next == NULL))
+  (((coroutinePointer) != NULL) && ((coroutinePointer)->next == NULL))
 
 /// @def coroutineFinished(coroutinePointer)
 ///
@@ -168,11 +174,11 @@ typedef struct Coroutine {
 /// @return Returns true when the coroutine is allocated and its state
 /// indicates that it's no longer running.
 #define coroutineFinished(coroutinePointer) \
-  ((coroutinePointer != NULL) \
-    && (coroutinePointer->state == COROUTINE_STATE_NOT_RUNNING))
+  (((coroutinePointer) != NULL) \
+    && ((coroutinePointer)->state == COROUTINE_STATE_NOT_RUNNING))
 
 // Coroutine function prototypes.  Doxygen inline in source file.
-int coroutineConfig(int stackSizeK, Coroutine *first);
+int coroutineConfig(Coroutine *first, int stackSize);
 Coroutine* coroutineCreate(void* func(void *arg));
 void* coroutineResume(Coroutine *targetCoroutine, void *arg);
 void* coroutineYield(void *arg);
