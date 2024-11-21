@@ -385,6 +385,29 @@ Coroutine* coroutineTssPop(tss_t* list) {
 
 #endif // THREAD_SAFE_COROUTINES
 
+/// @fn Coroutine* getRunningCoroutine(void)
+///
+/// @brief Get a pointer to the Coroutine that is currently running (the one
+/// that is at the top of the running stack.
+///
+/// @return Returns a pointer to the currently-running Coroutine on success,
+/// NULL on failure (if coroutines haven't been initialized yet).
+Coroutine* getRunningCoroutine(void) {
+  Coroutine *coroutine = _globalRunning;
+#ifdef THREAD_SAFE_COROUTINES
+  if (_coroutineThreadingSupportEnabled) {
+    call_once(&_threadMetadataSetup, coroutineSetupThreadMetadata);
+    if (!coroutineInitializeThreadMetadata(NULL)) {
+      coroutine = NULL;
+      return coroutine;
+    }
+    coroutine = (Coroutine*) tss_get(_tssRunning);
+  }
+#endif
+  
+  return coroutine;
+}
+
 /// @fn void* coroutinePass(Coroutine currentCoroutine, CoroutineFuncData arg)
 ///
 /// @brief Pass a value and control from one coroutine to another.  The target
@@ -785,6 +808,7 @@ void coroutineMain(void *stack) {
     // Block until we're called from the constructor again.
     funcData.data = ret;
     funcData = coroutinePass(&me, funcData);
+    me.nextMessage = NULL;
     func = funcData.func;
   }
 }
@@ -904,28 +928,18 @@ int coroutineTerminate(Coroutine *targetCoroutine, Comutex **mutexes) {
   return coroutineSuccess;
 }
 
-/// @fn int coroutineSetId(Coroutine* coroutine, int64_t id)
+/// @fn int coroutineSetId(Coroutine* coroutine, COROUTINE_ID_TYPE id)
 ///
 /// @brief Set the ID associated with a coroutine.
 ///
 /// @param coroutine A pointer to the coroutine whose ID is to be set.  If this
 ///   value is NULL then the ID of the currently running coroutine will be set.
-/// @param id A 64-bit signed integer to set as the coroutine's ID.
+/// @param id A signed integer to set as the coroutine's ID.
 ///
 /// @return This function always returns coroutineSuccess.
-int coroutineSetId(Coroutine* coroutine, int64_t id) {
+int coroutineSetId(Coroutine* coroutine, COROUTINE_ID_TYPE id) {
   if (coroutine == NULL) {
-    coroutine = _globalRunning;
-#ifdef THREAD_SAFE_COROUTINES
-    if (_coroutineThreadingSupportEnabled) {
-      call_once(&_threadMetadataSetup, coroutineSetupThreadMetadata);
-      if (!coroutineInitializeThreadMetadata(NULL)) {
-        return coroutineError;
-      }
-      coroutine = (Coroutine*) tss_get(_tssRunning);
-    }
-#endif
-    // running should always be non-NULL, so we shouldn't need to check again.
+    coroutine = getRunningCoroutine();
   }
 
   if (coroutine == NULL) {
@@ -939,7 +953,7 @@ int coroutineSetId(Coroutine* coroutine, int64_t id) {
   return coroutineSuccess;
 }
 
-/// @fn int64_t coroutineId(Coroutine* coroutine)
+/// @fn COROUTINE_ID_TYPE coroutineId(Coroutine* coroutine)
 ///
 /// @brief Get the ID associated with a coroutine.
 ///
@@ -949,19 +963,9 @@ int coroutineSetId(Coroutine* coroutine, int64_t id) {
 /// @return Returns the ID of the specified or current coroutine.  The ID
 /// returned will be COROUTINE_ID_NOT_SET if the ID of the coroutine has not
 /// been previously set with a call to coroutineSetId.
-int64_t coroutineId(Coroutine* coroutine) {
+COROUTINE_ID_TYPE coroutineId(Coroutine* coroutine) {
   if (coroutine == NULL) {
-    coroutine = _globalRunning;
-#ifdef THREAD_SAFE_COROUTINES
-    if (_coroutineThreadingSupportEnabled) {
-      call_once(&_threadMetadataSetup, coroutineSetupThreadMetadata);
-      if (!coroutineInitializeThreadMetadata(NULL)) {
-        return coroutineError;
-      }
-      coroutine = (Coroutine*) tss_get(_tssRunning);
-    }
-#endif
-    // running should always be non-NULL, so we shouldn't need to check again.
+    coroutine = getRunningCoroutine();
   }
 
   if (coroutine == NULL) {
@@ -1597,6 +1601,140 @@ void* coconditionLastYieldValue(Cocondition* cond) {
 
   if (cond != NULL) {
     returnValue = cond->lastYieldValue;
+  }
+
+  return returnValue;
+}
+
+/// @fn Comessage* comessagePeek(Coroutine *coroutine)
+///
+/// @brief Get the head of a coroutine's message queue but do not remove it from
+/// the queue.
+///
+/// @param coroutine A pointer to the Coroutine to interrogate.
+///
+/// @return Returns the head of the coroutine's message queue on success, NULL
+/// on failure.
+Comessage* comessagePeek(Coroutine *coroutine) {
+  Comessage *comessage = NULL;
+  if (coroutine == NULL) {
+    coroutine = getRunningCoroutine();
+  }
+
+  if (coroutine != NULL) {
+    comessage = coroutine->nextMessage;
+  }
+
+  return comessage;
+}
+
+/// @fn Comessage* comessagePop(Coroutine *coroutine)
+///
+/// @brief Get the head of a coroutine's message queue and remove it from the
+/// queue.
+///
+/// @param coroutine A pointer to the Coroutine to interrogate.
+///
+/// @return Returns the head of the coroutine's message queue on success, NULL
+/// on failure.
+Comessage* comessagePop(Coroutine *coroutine) {
+  Comessage *comessage = NULL;
+  if (coroutine == NULL) {
+    coroutine = getRunningCoroutine();
+  }
+
+  if (coroutine != NULL) {
+    comessage = coroutine->nextMessage;
+    if (comessage != NULL) {
+      coroutine->nextMessage = comessage->next;
+      comessage->next = NULL;
+    }
+  }
+
+  return comessage;
+}
+
+/// @fn Comessage* comessagePopType(Coroutine *coroutine, int type)
+///
+/// @brief Get the first message of the specified type from a coroutine's
+/// message queue and remove it from the queue.
+///
+/// @param coroutine A pointer to the Coroutine to interrogate.
+/// @param type The type of message to get.
+///
+/// @return Returns the first message of the specified type on success, NULL on
+/// failure.
+Comessage* comessagePopType(Coroutine *coroutine, int type) {
+  Comessage *comessage = NULL;
+  if (coroutine == NULL) {
+    coroutine = getRunningCoroutine();
+  }
+
+  if (coroutine != NULL) {
+    comessage = coroutine->nextMessage;
+    if (comessage != NULL) {
+      if (comessage->type == type) {
+        coroutine->nextMessage = comessage->next;
+        comessage->next = NULL;
+      } else {
+        Comessage *prev = comessage;
+        comessage = comessage->next;
+        while (comessage != NULL) {
+          if (comessage->type == type) {
+            break;
+          }
+
+          prev = comessage;
+          comessage = comessage->next;
+        }
+
+        if (comessage != NULL) {
+          prev->next = comessage->next;
+          comessage->next = NULL;
+        }
+      }
+    }
+  }
+
+  return comessage;
+}
+
+/// @fn int comessagePush(Coroutine *coroutine, Comessage *comessage)
+///
+/// @brief Push a message onto a coroutine's message queue.
+///
+/// @param coroutine A pointer to the Coroutine with the message queue to add
+///   to.
+///
+/// @return Returns 0 on success, -1 on failure.
+int comessagePush(Coroutine *coroutine, Comessage *comessage) {
+  int returnValue = coroutineSuccess;
+
+  if (comessage == NULL) {
+    // This is invalid.
+    returnValue = coroutineError;
+    return returnValue;
+  }
+  comessage->from = getRunningCoroutine();
+
+  if (coroutine == NULL) {
+    // Sending a message to ourselves.
+    coroutine = comessage->from;
+  }
+
+  if (coroutine != NULL) {
+    Comessage *nextMessage = coroutine->nextMessage;
+    if (nextMessage != NULL) {
+      while (nextMessage->next != NULL) {
+        nextMessage = nextMessage->next;
+      }
+      nextMessage->next = comessage;
+    } else {
+      coroutine->nextMessage = comessage;
+    }
+  } else {
+    // Coroutines haven't been configured yet.
+    returnValue = coroutineError;
   }
 
   return returnValue;

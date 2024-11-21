@@ -97,11 +97,29 @@ extern "C"
 #define COROUTINE_DEFAULT_STACK_SIZE 16384
 #endif
 
+/// @def COROUTINE_ID_TYPE
+///
+/// @brief The integer type to use for coroutine IDs.  Defaults to 64-bit IDs
+/// if none is provided.
+#ifndef COROUTINE_ID_TYPE
+#define COROUTINE_ID_TYPE int64_t
+#endif
+
 /// @def COROUTINE_ID_NOT_SET
 ///
 /// @brief Special value to indicate that a coroutine's ID value is not set.
 /// This is the initial value just after the coroutine constructor completes.
+#if COROUTINE_ID_TYPE == int64_t
 #define COROUTINE_ID_NOT_SET ((int64_t) 0x8000000000000000)
+#elif COROUTINE_ID_TYPE == int32_t
+#define COROUTINE_ID_NOT_SET ((int32_t) 0x80000000)
+#elif COROUTINE_ID_TYPE == int16_t
+#define COROUTINE_ID_NOT_SET ((int16_t) 0x8000)
+#elif COROUTINE_ID_TYPE == int8_t
+#define COROUTINE_ID_NOT_SET ((int8_t) 0x80)
+#else
+#error "Invalid COROUTINE_ID_TYPE."
+#endif
 
 /// @enum CoroutineState
 ///
@@ -112,6 +130,11 @@ typedef enum CoroutineState {
   COROUTINE_STATE_BLOCKED,
   NUM_COROUTINE_STATES
 } CoroutineState;
+
+/// @typedef CoroutineFunction
+///
+/// Definition for a function signature that can be used as a coroutine.
+typedef void* (*CoroutineFunction)(void *arg);
 
 /// @union CoroutineFuncData
 ///
@@ -129,6 +152,10 @@ typedef union CoroutineFuncData {
   void* data;
 } CoroutineFuncData;
 
+// Forward declarations.  Doxygen below.
+typedef struct Comutex Comutex;
+typedef struct Comessage Comessage;
+
 /// @struct Coroutine
 ///
 /// @brief Data structure to manage an individual coroutine.
@@ -142,15 +169,18 @@ typedef union CoroutineFuncData {
 ///   signal.
 /// @param passed The CoroutineFuncData that's passed between contexts by the
 ///   coroutinePass function (on a yield or resume call).
+/// @param nextMessage The next message that is waiting for the coroutine to
+///   process.
 typedef struct Coroutine {
   struct Coroutine *next;
   jmp_buf context;
-  int64_t id;
+  COROUTINE_ID_TYPE id;
   CoroutineState state;
   struct Coroutine *nextToSignal;
   struct Coroutine *prevToSignal;
   jmp_buf resetContext;
   CoroutineFuncData passed;
+  Comessage *nextMessage;
 } Coroutine;
 
 /// @def coroutineResumable(coroutinePointer)
@@ -177,18 +207,31 @@ typedef struct Coroutine {
   (((coroutinePointer) != NULL) \
     && ((coroutinePointer)->state == COROUTINE_STATE_NOT_RUNNING))
 
+/// @def coroutineRunning(coroutinePointer)
+///
+/// @brief Examines a coroutine to determine whether or not it is still running.
+///
+/// @param coroutinePointer A pointer to the Coroutine to examine.
+///
+/// @return Returns true when the coroutine is allocated and its state
+/// indicates that it is still running.
+#define coroutineRunning(coroutinePointer) \
+  (((coroutinePointer) != NULL) \
+    && ((coroutinePointer)->state != COROUTINE_STATE_NOT_RUNNING))
+
 // Coroutine function prototypes.  Doxygen inline in source file.
 int coroutineConfig(Coroutine *first, int stackSize);
-Coroutine* coroutineCreate(void* func(void *arg));
+Coroutine* coroutineCreate(CoroutineFunction func);
 void* coroutineResume(Coroutine *targetCoroutine, void *arg);
 void* coroutineYield(void *arg);
-int coroutineSetId(Coroutine *coroutine, int64_t id);
-int64_t coroutineId(Coroutine *coroutine);
+int coroutineSetId(Coroutine *coroutine, COROUTINE_ID_TYPE id);
+COROUTINE_ID_TYPE coroutineId(Coroutine *coroutine);
 CoroutineState coroutineState(Coroutine *coroutine);
 #ifdef THREAD_SAFE_COROUTINES
 void coroutineSetThreadingSupportEnabled(bool state);
 bool coroutineThreadingSupportEnabled();
 #endif
+int coroutineTerminate(Coroutine *targetCoroutine, Comutex **mutexes);
 
 
 // Coroutine mutex support.
@@ -262,7 +305,39 @@ int coconditionWait(Cocondition *cond, Comutex *mtx);
 void* coconditionLastYieldValue(Cocondition *cond);
 
 
-int coroutineTerminate(Coroutine *targetCoroutine, Comutex **mutexes);
+// Coroutine message support.
+
+/// @struct Comessage
+///
+/// @brief Definition for a coroutine message that can be pushed onto a
+/// Coroutine's message queue.
+///
+/// @param type Integer value designating the type of message for the receiving
+///   coroutine.
+/// @param data A pointer to the message data for the destination coroutine.
+/// @param storage 64-bits of storage for a small message.
+/// @param next A pointer to the next Comessage in a coroutine's message queue.
+/// @param handled A boolean flag to indicate whether or not the receiving
+///   coroutine has handled the message yet.
+/// @param inUse A boolean flag to indicate whether or not this Comessage is in
+///   in use.
+/// @param from A pointer to the Coroutine instance for the sending coroutine.
+typedef struct Comessage {
+  int type;
+  CoroutineFuncData funcData;
+  uint8_t storage[sizeof(uint64_t)];
+  struct Comessage *next;
+  bool handled;
+  bool inUse;
+  Coroutine *from;
+} Comessage;
+
+// Coroutine message function prototypes.  Doxygen inline in source file.
+Comessage* comessagePeek(Coroutine *coroutine);
+Comessage* comessagePop(Coroutine *coroutine);
+Comessage* comessagePopType(Coroutine *coroutine, int type);
+int comessagePush(Coroutine *coroutine, Comessage *comessage);
+
 
 #ifdef __cplusplus
 } // extern "C"
