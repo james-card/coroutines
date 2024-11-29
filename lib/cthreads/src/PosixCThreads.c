@@ -39,6 +39,22 @@
 #define ZEROINIT(x) x = {0}
 #endif // __cplusplus
 
+#ifdef __cplusplus
+extern "C"
+{
+#endif
+
+// Functions, variables, and types defined in CThreadsMessages.c
+extern once_flag thrd_msg_q_storage_initialized;
+typedef struct thrd_msg_q_t thrd_msg_q_t;
+void thrd_msg_q_storage_init(void);
+int thrd_msg_q_create(void);
+int thrd_msg_q_destroy(thrd_msg_q_t *queue);
+
+#ifdef __cplusplus
+}
+#endif
+
 void call_once(once_flag* flag, void(*func)(void)) {
   pthread_once(flag, func);
 }
@@ -66,6 +82,7 @@ int mtx_init(mtx_t *mtx, int type) {
       return returnValue;
     }
     
+    memset(mtx, 0, sizeof(*mtx));
     returnValue = pthread_mutex_init(mtx, &attribs);
     
     err = pthread_mutexattr_destroy(&attribs);
@@ -211,6 +228,9 @@ void *posix_c_threads_create_wrapper(void* wrapper_args) {
   // We want to be able to kill this thread if we need to.
   pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
   
+  // Create the message queue for this thread.
+  thrd_msg_q_create();
+  
   PthreadCreateWrapperArgs *cthread_args
     = (PthreadCreateWrapperArgs*) wrapper_args;
   thrd_start_t func = cthread_args->func;
@@ -229,7 +249,13 @@ void *posix_c_threads_create_wrapper(void* wrapper_args) {
 }
 
 int thrd_create(thrd_t *thr, thrd_start_t func, void *arg) {
+  if (thr == NULL) {
+    return thrd_error;
+  }
+
   int returnValue = thrd_success;
+  
+  call_once(&thrd_msg_q_storage_initialized, thrd_msg_q_storage_init);
   
   PthreadCreateWrapperArgs *wrapper_args
     = (PthreadCreateWrapperArgs*) malloc(sizeof(PthreadCreateWrapperArgs));
@@ -272,6 +298,9 @@ int thrd_equal(thrd_t thr0, thrd_t thr1) {
 }
 
 void thrd_exit(int res) {
+  // Destroy the message queue for this thread.
+  thrd_msg_q_destroy(NULL);
+
   pthread_exit((void*) ((intptr_t) res));
 }
 

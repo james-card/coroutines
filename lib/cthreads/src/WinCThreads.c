@@ -30,7 +30,27 @@
 
 #ifdef _WIN32
 #include "WinCThreads.h"
+#include "RadixTree.h"
 #include <stdio.h>
+
+#ifdef __cplusplus
+extern "C"
+{
+#endif
+
+// Functions, variables and types defined in CThreadsMessages.c
+extern once_flag thrd_msg_q_storage_initialized;
+typedef struct thrd_msg_q_t thrd_msg_q_t;
+void thrd_msg_q_storage_init(void);
+int thrd_msg_q_create(void);
+int thrd_msg_q_destroy(thrd_msg_q_t *queue);
+
+#ifdef __cplusplus
+}
+#endif
+
+#define TSS_T_BIT_WIDTH (sizeof(tss_t) * 8)
+#define ARRAY_OF_RADIX_TREES_SIZE (1 << TSS_T_BIT_WIDTH)
 
 #if LOGGING_ENABLED && WIN_CTHREADS_LOGGING_ENABLED
 
@@ -222,488 +242,6 @@ extern FILE *logFile;
 // by a fucntion that invokes thrd_exit upon the functions's return.  The
 // destructors are also called in the event that the thread-specific storage is
 // deleted by a call to tss_delete.
-
-/****************** Begin Support Data Structure Code *************************/
-
-#define RADIX_TREE_KEY_ELEMENT uint8_t
-#define RADIX_TREE_KEY_ELEMENT_BIT_WIDTH (sizeof(RADIX_TREE_KEY_ELEMENT) * 8)
-#define RADIX_TREE_NUM_KEYS_BIT_SHIFT 0
-#define RADIX_TREE_ARRAY_SIZE (1 << RADIX_TREE_KEY_ELEMENT_BIT_WIDTH)
-#define TSS_T_BIT_WIDTH (sizeof(tss_t) * 8)
-#define ARRAY_OF_RADIX_TREES_SIZE (1 << TSS_T_BIT_WIDTH)
-
-/// @def RADIX_TREE_FIND_NODE
-///
-/// @brief Use the local variables 'numKeys', 'node', 'currentKeyIndex', 'key',
-/// and 'radixTreeNodes' to find the target node of the key.  This is the search
-/// algorithm used in windowsRadixTreeNodeGetValue and
-/// windowsRadixTreeNodeDeleteValue.  windowsRadixTreeNodeSetValue has special
-/// logic.
-///
-/// @details
-/// There are two ways we can go about this search:  We can start from the
-/// beginning of the key and go to the end or we can start from the end of it
-/// and go to the beginning.  It is more space efficient to start with the end
-/// that is most likely to have data that's common to the keys because that will
-/// result in the fewest branches.  (The number of leaves remains unchanged
-/// either way.)  Because we're searching on integer values, this means that
-/// it's most optimal to start from the end that is more likely to have zeros
-/// in it, i.e. the most-significant bytes.  This means that we need to take
-/// endianness into account here.  If I was interested in supporting big-endian
-/// systems then I would put in some code here that would optimize this search
-/// depending on the system.  However, as of the time of this comment, I have no
-/// plans to support big-endian systems.  So, I am therefore only providing the
-/// optimization for little-endian systems.
-///
-/// One additional note on this:  It is also marginally more performant to do
-/// this optimization.
-///
-/// JBC 2024-11-15
-#define RADIX_TREE_FIND_NODE() \
-    do { \
-        while ((numKeys > 0) && (node != NULL)) { \
-            currentKeyIndex = key[numKeys - 1]; \
-            radixTreeNodes = node->radixTreeNodes; \
-            node = radixTreeNodes[currentKeyIndex]; \
-            numKeys--; \
-        } \
-    } while (0)
-
-/// @struct WindowsRadixTreeNode
-///
-/// @brief Individual node within the radix tree.
-///
-/// @var value A pointer to the value that exactly matches the key.
-/// @var radixTreeNodes The array of WindowsRadixTreeNodes subordinate to this
-///   node.
-/// @var radixTreeNodesBitmap The bitmap of allocated nodes within
-///   radixTreeNodes.
-typedef struct WindowsRadixTreeNode {
-    volatile void *value;
-    struct WindowsRadixTreeNode *radixTreeNodes[RADIX_TREE_ARRAY_SIZE];
-} WindowsRadixTreeNode;
-
-/// @struct WindowsRadixTree
-///
-/// @brief Container for the radix tree.
-///
-/// @var root A pointer to the top WindowsRadixTreeNode tree;
-/// @var destructor A tss_dtor_t function used to free the values of the tree.
-typedef struct WindowsRadixTree {
-    WindowsRadixTreeNode *root;
-    tss_dtor_t destructor;
-} WindowsRadixTree;
-
-/// @fn WindowsRadixTree* windowsRadixTreeCreate(tss_dtor_t destructor)
-///
-/// @brief Create a radix tree to be used with the thread-specific storage
-/// calls.
-///
-/// @param destructor The destructor to call on the values in the tree when one
-/// of them is deleted or the tree is destroyed.
-///
-/// @return Returns a pointer to a newly-allocated WindowsRadixTree on success,
-/// NULL on failure.
-static inline WindowsRadixTree* windowsRadixTreeCreate(tss_dtor_t destructor) {
-    WindowsRadixTree *tree
-        = (WindowsRadixTree*) malloc(sizeof(WindowsRadixTree));
-    if (tree == NULL) {
-        LOG_MALLOC_FAILURE();
-        return NULL;
-    }
-
-    tree->root
-        = (WindowsRadixTreeNode*) calloc(1, sizeof(WindowsRadixTreeNode));
-    if (tree->root == NULL) {
-        LOG_MALLOC_FAILURE();
-        free(tree); tree = NULL;
-        return NULL;
-    }
-
-    tree->destructor = destructor;
-
-    return tree;
-}
-
-/// @fn WindowsRadixTreeNode* windowsRadixTreeDestroyNode(
-///         WindowsRadixTreeNode *node, tss_dtor_t destructor)
-///
-/// @brief Detroy a WindowsRadixTreeNode, its value, and all its sub-nodes.
-///
-/// @param node A pointer to a previously-allocated WindowsRadixTreeNode.
-/// @param destructor A tss_dtor_t that can be used to destroy the value held by
-///   the node.
-///
-/// @return This function always returns NULL.
-static inline WindowsRadixTreeNode* windowsRadixTreeDestroyNode(
-    WindowsRadixTreeNode *node, tss_dtor_t destructor
-) {
-    if (node != NULL) {
-        // destructor is guaranteed to be non-NULL by the thread-specific
-        // storage functions.
-        destructor(InterlockedExchangePointer(
-            (void * volatile*) &node->value, NULL));
-
-        WindowsRadixTreeNode** radixTreeNodes = node->radixTreeNodes;
-        // Recursively destroy any sub-nodes.
-        for (uint32_t ii = 0; ii < RADIX_TREE_ARRAY_SIZE; ii++) {
-            if (radixTreeNodes[ii] != NULL) {
-                windowsRadixTreeDestroyNode(
-                    InterlockedExchangePointer(
-                        (void * volatile*) &radixTreeNodes[ii], NULL),
-                    destructor);
-            }
-        }
-        free(node); node = NULL;
-    }
-
-    return node;
-}
-
-/// @fn WindowsRadixTree* windowsRadixTreeDestroy(WindowsRadixTree *tree)
-///
-/// @brief Destroy a WindowsRadixTree.
-///
-/// @note We can't make this a static inline function because we need to pass
-/// it as the tss_dtor_t pointer to windowsRadixTreeCreate for the first-level
-/// trees.
-///
-/// @param tree A pointer to a previously-allocated WindowsRadixTree.
-///
-/// @return This function always returns NULL.
-WindowsRadixTree* windowsRadixTreeDestroy(WindowsRadixTree *tree) {
-    if (tree != NULL) {
-        windowsRadixTreeDestroyNode(
-            InterlockedExchangePointer((void * volatile*) &tree->root, NULL),
-            tree->destructor);
-        free(tree); tree = NULL;
-    }
-    return tree;
-}
-
-/// @fn void* windowsRadixTreeNodeGetValue(WindowsRadixTreeNode *node,
-///         const volatile RADIX_TREE_KEY_ELEMENT *key, size_t numKeys)
-///
-/// @brief Get a previously-set value from a WindowsRadixTreeNode.
-///
-/// @param node A pointer to a previously-allocated WindowsRadixTreeNode or
-///   NULL.
-/// @param key A pointer to key element values.
-/// @param numKeys The number of keys pointed to by the key.
-///
-/// @return Returns the value in the tree if it exists, NULL if not.
-static inline void* windowsRadixTreeNodeGetValue(WindowsRadixTreeNode *node,
-    const volatile RADIX_TREE_KEY_ELEMENT *key, size_t numKeys
-) {
-    const volatile void *returnValue = NULL;
-    WindowsRadixTreeNode** radixTreeNodes = NULL;
-    RADIX_TREE_KEY_ELEMENT currentKeyIndex = 0;
-
-    RADIX_TREE_FIND_NODE();
-
-    if (node != NULL) {
-        returnValue = node->value;
-    }
-
-    return (void*) returnValue;
-}
-
-/// @fn void* windowsRadixTreeGetValue(WindowsRadixTree *tree,
-///         const volatile void *key, size_t keySize)
-///
-/// @brief Get a value from a WindowsRadixTree.
-///
-/// @param tree A pointer to a previously-allocated WindowsRadixTree.
-/// @param key A pointer to the key to look for.
-/// @param keySize The number of bytes in the key.
-///
-/// @return Returns the value found on success, NULL if not found or on error.
-static inline void* windowsRadixTreeGetValue(WindowsRadixTree *tree,
-    const volatile void *key, size_t keySize
-) {
-    void *returnValue = NULL;
-    if ((tree == NULL) || ((key == NULL) && (keySize != 0))) {
-        return returnValue;
-    }
-
-    returnValue = windowsRadixTreeNodeGetValue(
-        tree->root,
-       (RADIX_TREE_KEY_ELEMENT*) key,
-       (keySize >> RADIX_TREE_NUM_KEYS_BIT_SHIFT)
-    );
-
-    return returnValue;
-}
-
-/// @fn void* windowsRadixTreeGetValue2(WindowsRadixTree *tree1,
-///         const volatile void *key1, size_t keySize1,
-///         const volatile void *key2, size_t keySize2)
-///
-/// @brief Get a value from a second-level WindowsRadixTree.
-///
-/// @param tree1 A pointer to the top-level WindowsRadixTree.
-/// @param key1 A pointer to the key of the second-level tree.
-/// @param keySize1 The number of bytes in key1.
-/// @param key1 A pointer to the key of value in the second-level tree.
-/// @param keySize1 The number of bytes in key2.
-///
-/// @return Returns the found element on success, NULL on failure.
-static inline void* windowsRadixTreeGetValue2(WindowsRadixTree *tree1,
-    const volatile void *key1, size_t keySize1,
-    const volatile void *key2, size_t keySize2
-) {
-    void *returnValue = NULL;
-    if ((tree1 == NULL)
-        || ((key1 == NULL) && (keySize1 != 0))
-        || ((key2 == NULL) && (keySize2 != 0))
-    ) {
-        return returnValue; // NULL
-    }
-
-    WindowsRadixTree *tree2
-        = (WindowsRadixTree*) windowsRadixTreeGetValue(tree1, key1, keySize1);
-    if (tree2 != NULL) {
-        returnValue = windowsRadixTreeGetValue(tree2, key2, keySize2);
-    }
-
-    return returnValue;
-}
-
-/// @fn int windowsRadixTreeNodeSetValue(WindowsRadixTreeNode *node,
-///         const volatile RADIX_TREE_KEY_ELEMENT *key, size_t numKeys,
-///         volatile void *value)
-///
-/// @brief Set a value in the radix tree.  Allocate any intermediate nodes if
-/// they don't exist.
-///
-/// @param node A pointer to a WindowsRadixTreeNode in the tree.
-/// @param key An array of key elements.
-/// @param numKeys The number of keys in the keys array.
-/// @param value A pointer to the value to set in the tree.
-///
-/// @return Returns 0 if the value replaces an existing value in the tree, 1 if
-/// the value is a new value in the tree.
-static inline int windowsRadixTreeNodeSetValue(WindowsRadixTreeNode *node,
-    const volatile RADIX_TREE_KEY_ELEMENT *key, size_t numKeys,
-    volatile void *value
-) {
-    int returnValue = 0;
-    RADIX_TREE_KEY_ELEMENT currentKeyIndex = 0;
-    WindowsRadixTreeNode** radixTreeNodes = NULL;
-    while (numKeys > 0) {
-        currentKeyIndex = key[numKeys - 1];
-        radixTreeNodes = node->radixTreeNodes;
-        if (radixTreeNodes[currentKeyIndex] == NULL) {
-            WindowsRadixTreeNode *radixTreeNode = (WindowsRadixTreeNode*)
-                calloc(1, sizeof(WindowsRadixTreeNode));
-            if (InterlockedCompareExchangePointer(
-                (PVOID*) &radixTreeNodes[currentKeyIndex],
-                (PVOID) radixTreeNode,
-                NULL) != NULL
-            ) {
-                free(radixTreeNode); radixTreeNode = NULL;
-            }
-        }
-
-        node = radixTreeNodes[currentKeyIndex];
-        numKeys--;
-    }
-
-    if (node->value == NULL) {
-        returnValue = 1;
-    }
-    node->value = value;
-
-    return returnValue;
-}
-
-/// @fn int windowsRadixTreeSetValue(WindowsRadixTree *tree,
-///         const volatile void *key, size_t keySize,
-///         volatile void *value)
-///
-/// @brief Set a value in the radix tree.
-///
-/// @param tree A pointer to a previously-allocated WindowsRadixTree.
-/// @param key A pointer to a key value.
-/// @param keySize The number of bytes of the key.
-/// @param value A pointer to the value to set.
-///
-/// @return Returns the number of new elements added on success, -1 on error.
-static inline int windowsRadixTreeSetValue(WindowsRadixTree *tree,
-    const volatile void *key, size_t keySize, volatile void *value
-) {
-    int returnValue = -1;
-    if ((tree == NULL) || ((key == NULL) && (keySize != 0))) {
-        return returnValue; // -1
-    }
-
-    returnValue = windowsRadixTreeNodeSetValue(
-        tree->root,
-        (RADIX_TREE_KEY_ELEMENT*) key,
-        (keySize >> RADIX_TREE_NUM_KEYS_BIT_SHIFT),
-        value
-    );
-
-    return returnValue;
-}
-
-/// @fn int windowsRadixTreeSetValue2(WindowsRadixTree *tree1,
-///         const volatile void *key1, size_t keySize1,
-///         const volatile void *key2, size_t keySize2,
-///         volatile void *value, tss_dtor_t destructor2)
-///
-/// @brief Set a value in a second-level WindowsRadixTree.
-///
-/// @param tree1 A pointer to the top-level WindowsRadixTree.
-/// @param key1 A pointer to the key of the second-level tree.
-/// @param keySize1 The number of bytes in key1.
-/// @param key1 A pointer to the key of value in the second-level tree.
-/// @param keySize1 The number of bytes in key2.
-/// @param destructor2 The tss_dtor_t for the second-level tree if a second-
-///    level tree doesn't already exist for key1.
-///
-/// @return Returns the number of new elements added on success, -1 on error.
-static inline int windowsRadixTreeSetValue2(WindowsRadixTree *tree1,
-    const volatile void *key1, size_t keySize1,
-    const volatile void *key2, size_t keySize2,
-    volatile void *value, tss_dtor_t destructor2
-) {
-    int returnValue = -1;
-    if ((tree1 == NULL)
-        || ((key1 == NULL) && (keySize1 != 0))
-        || ((key2 == NULL) && (keySize2 != 0))
-    ) {
-        return returnValue; // -1
-    }
-
-    WindowsRadixTree *tree2
-        = (WindowsRadixTree*) windowsRadixTreeGetValue(tree1, key1, keySize1);
-    if ((tree2 == NULL) && (destructor2 != NULL)) {
-        WindowsRadixTree *newTree = windowsRadixTreeCreate(destructor2);
-        windowsRadixTreeSetValue(tree1, key1, keySize1, newTree);
-        tree2 = (WindowsRadixTree*) windowsRadixTreeGetValue(
-            tree1, key1, keySize1);
-        if (tree2 != newTree) {
-            // We were in a race condition and something else overwrote our
-            // tree.  Delete the one we created.
-            newTree = windowsRadixTreeDestroy(newTree);
-            // Get it again just to be sure.
-            tree2 = (WindowsRadixTree*) windowsRadixTreeGetValue(
-                tree1, key1, keySize1);
-        }
-    }
-    
-    if (tree2 == NULL) {
-        // There's no tree and we have nothing to construct the missing tree
-        // with.  We can't work like this.  Fail.
-        return returnValue; // -1
-    }
-
-    returnValue = windowsRadixTreeSetValue(tree2, key2, keySize2, value);
-
-    return returnValue;
-}
-
-/// @fn int windowsRadixTreeNodeDeleteValue(WindowsRadixTreeNode *node,
-///         const volatile RADIX_TREE_KEY_ELEMENT *key, size_t numKeys,
-///         tss_tdor_t destructor)
-///
-/// @brief Delete a previously-set value from a WindowsRadixTreeNode.
-///
-/// @param node A pointer to a previously-allocated WindowsRadixTreeNode or
-///   NULL.
-/// @param key A pointer to key element values.
-/// @param numKeys The number of keys pointed to by the key.
-/// @param destructor The destructor to call on the value, if found.
-///
-/// @return Returns the number of elements found and deleted (0 or 1).
-static inline int windowsRadixTreeNodeDeleteValue(WindowsRadixTreeNode *node,
-    const volatile RADIX_TREE_KEY_ELEMENT *key, size_t numKeys,
-    tss_dtor_t destructor
-) {
-    int returnValue = 0;
-    RADIX_TREE_KEY_ELEMENT currentKeyIndex = 0;
-    WindowsRadixTreeNode** radixTreeNodes = NULL;
-
-    RADIX_TREE_FIND_NODE();
-
-    if (node != NULL) {
-        // destructor is guaranteed to be non-NULL by the thread-specific
-        // storage functions.
-        destructor(InterlockedExchangePointer(
-            (void * volatile*) &node->value, NULL)
-        );
-        returnValue = 1;
-    }
-
-    return returnValue;
-}
-
-/// @fn int windowsRadixTreeDeleteValue(WindowsRadixTree *tree,
-///         const volatile void *key, size_t keySize)
-///
-/// @brief Delete a value from a WindowsRadixTree.
-///
-/// @param tree A pointer to a previously-allocated WindowsRadixTree.
-/// @param key A pointer to the key to look for.
-/// @param keySize The number of bytes in the key.
-///
-/// @return Returns the number of elements found and deleted on success, -1 on
-/// error.
-static inline int windowsRadixTreeDeleteValue(WindowsRadixTree *tree,
-    const volatile void *key, size_t keySize
-) {
-    int returnValue = -1;
-    if ((tree == NULL) || ((key == NULL) && (keySize != 0))) {
-        return returnValue; // -1
-    }
-
-    returnValue = windowsRadixTreeNodeDeleteValue(
-        tree->root,
-        (RADIX_TREE_KEY_ELEMENT*) key,
-        (keySize >> RADIX_TREE_NUM_KEYS_BIT_SHIFT),
-        tree->destructor
-    );
-
-    return returnValue;
-}
-
-/// @fn int windowsRadixTreeDeleteValue2(WindowsRadixTree *tree1,
-///         const volatile void *key1, size_t keySize1,
-///         const volatile void *key2, size_t keySize2)
-///
-/// @brief Delete a value from a second-level WindowsRadixTree.
-///
-/// @param tree1 A pointer to the top-level WindowsRadixTree.
-/// @param key1 A pointer to the key of the second-level tree.
-/// @param keySize1 The number of bytes in key1.
-/// @param key1 A pointer to the key of value in the second-level tree.
-/// @param keySize1 The number of bytes in key2.
-///
-/// @return Returns the number of elements found and deleted on success, -1 on
-/// error.
-static inline int windowsRadixTreeDeleteValue2(WindowsRadixTree *tree1,
-    const volatile void *key1, size_t keySize1,
-    const volatile void *key2, size_t keySize2
-) {
-    int returnValue = -1;
-    if ((tree1 == NULL)
-        || ((key1 == NULL) && (keySize1 != 0))
-        || ((key2 == NULL) && (keySize2 != 0))
-    ) {
-        return returnValue; // -1
-    }
-
-    WindowsRadixTree *tree2
-        = (WindowsRadixTree*) windowsRadixTreeGetValue(tree1, key1, keySize1);
-    if (tree2 != NULL) {
-        returnValue = windowsRadixTreeDeleteValue(tree2, key2, keySize2);
-    }
-
-    return returnValue;
-}
-
-/******************** End Support Data Structure Code *************************/
 
 // Support tss_dtor_t function that does nothing.
 static void winCThreadsNullFunction(void *parameter) {
@@ -942,31 +480,30 @@ typedef struct TssId {
     tss_t key;
 } TssId;
 
-static WindowsRadixTree **tssStorageByKey = NULL;
-static WindowsRadixTree * tssStorageByThread = NULL;
+static RadixTree **tssStorageByKey = NULL;
+static RadixTree * tssStorageByThread = NULL;
 static tss_t tssIndex = 1;
 static once_flag tssMetadataOnceFlag = ONCE_FLAG_INIT;
 static bool tssMetadataInitialized = false;
 
 void tssIdDestroy(TssId *tssId) {
     if (tssId != NULL) {
-        windowsRadixTreeDeleteValue(
+        radixTreeDeleteValue(
             tssStorageByKey[tssId->key], &tssId->thread, sizeof(tssId->thread));
         free(tssId); tssId = NULL;
     }
 }
 
 void initializeTssMetadata(void) {
-    tssStorageByKey = (WindowsRadixTree**) calloc(
-        1, ARRAY_OF_RADIX_TREES_SIZE * sizeof(WindowsRadixTree*));
+    tssStorageByKey = (RadixTree**) calloc(
+        1, ARRAY_OF_RADIX_TREES_SIZE * sizeof(RadixTree*));
     if (tssStorageByKey == NULL) {
         // No tree.  Can't proceed.
         LOG_MALLOC_FAILURE();
         exit(1);
     }
 
-    tssStorageByThread = windowsRadixTreeCreate(
-        (tss_dtor_t) ((void*) windowsRadixTreeDestroy));
+    tssStorageByThread = radixTreeCreate((tss_dtor_t) radixTreeDestroy);
     if (tssStorageByThread == NULL) {
         // No tree.  Can't proceed.
         LOG_MALLOC_FAILURE();
@@ -988,7 +525,7 @@ int tss_create(tss_t* key, tss_dtor_t dtor) {
         dtor = winCThreadsNullFunction;
     }
 
-    tssStorageByKey[tssIndex] = windowsRadixTreeCreate(dtor);
+    tssStorageByKey[tssIndex] = radixTreeCreate(dtor);
 
     *key = tssIndex;
     tssIndex++;
@@ -1004,7 +541,7 @@ void tss_delete(tss_t key) {
     }
 
     tssStorageByKey[key]
-        = windowsRadixTreeDestroy(tssStorageByKey[key]);
+        = radixTreeDestroy(tssStorageByKey[key]);
 
     return;
 }
@@ -1017,7 +554,7 @@ void* tss_get(tss_t key) {
     }
 
     thrd_t thisThread = thrd_current();
-    void *returnValue = windowsRadixTreeGetValue(
+    void *returnValue = radixTreeGetValue(
         tssStorageByKey[key], &thisThread, sizeof(thisThread));
 
     return returnValue;
@@ -1033,26 +570,26 @@ int tss_set(tss_t key, void* val) {
 
     thrd_t thisThread = thrd_current();
     do {
-        if (windowsRadixTreeSetValue(
+        if (radixTreeSetValue(
             tssStorageByKey[key], &thisThread, sizeof(thisThread), val) < 0
         ) {
             // returnValue is thrd_error
             break;
         }
 
-        TssId *tssId = (TssId*) windowsRadixTreeGetValue2(tssStorageByThread,
+        TssId *tssId = (TssId*) radixTreeGetValue2(tssStorageByThread,
             &thisThread, sizeof(thisThread), &key, sizeof(key));
         if (tssId == NULL) {
             TssId *newTssId = (TssId*) malloc(sizeof(TssId));
-            if (windowsRadixTreeSetValue2(tssStorageByThread,
+            if (radixTreeSetValue2(tssStorageByThread,
                 &thisThread, sizeof(thisThread), &key, sizeof(key),
-                newTssId, (tss_dtor_t) ((void*) tssIdDestroy)) < 0
+                newTssId, (tss_dtor_t) tssIdDestroy) < 0
             ) {
                 // This should be impossible.  Bail.
                 // returnValue is thrd_error
                 break;
             }
-            tssId = (TssId*) windowsRadixTreeGetValue2(tssStorageByThread,
+            tssId = (TssId*) radixTreeGetValue2(tssStorageByThread,
                 &thisThread, sizeof(thisThread), &key, sizeof(key));
             if (tssId == NULL) {
                 // Something is very wrong.  Fail.
@@ -1071,7 +608,7 @@ int tss_set(tss_t key, void* val) {
 
 
 // Thread support.
-static WindowsRadixTree* attachedThreads = NULL;
+static RadixTree* attachedThreads = NULL;
 
 typedef struct WindowsCreateWrapperArgs {
   thrd_start_t func;
@@ -1081,6 +618,9 @@ typedef struct WindowsCreateWrapperArgs {
 DWORD __stdcall windows_create_wrapper(LPVOID wrapper_args) {
     printLog(TRACE, "ENTER windows_create_wrapper(wrapper_args=%p)\n",
         wrapper_args);
+
+    // Create the message queue for this thread.
+    thrd_msg_q_create();
 
     WindowsCreateWrapperArgs *cthread_args
         = (WindowsCreateWrapperArgs*) wrapper_args;
@@ -1101,12 +641,15 @@ int thrd_create(thrd_t* thr, thrd_start_t func, void* arg) {
         thr, func, arg);
 
     if (thr == NULL) {
-      printLog(TRACE, "EXIT thrd_create(thr=%p, func=%p, arg=%p) = {%d}\n",
-        thr, func, arg, thrd_error);
-      return thrd_error;
+        printLog(TRACE, "EXIT thrd_create(thr=%p, func=%p, arg=%p) = {%d}\n",
+            thr, func, arg, thrd_error);
+        return thrd_error;
     }
 
     int returnValue = thrd_success;
+
+    call_once(&thrd_msg_q_storage_initialized, thrd_msg_q_storage_init);
+
     WindowsCreateWrapperArgs *wrapper_args
         = calloc(1, sizeof(WindowsCreateWrapperArgs));
     if (wrapper_args == NULL) {
@@ -1135,7 +678,7 @@ int thrd_create(thrd_t* thr, thrd_start_t func, void* arg) {
     if (threadHandle != NULL) {
         if (attachedThreads == NULL) {
             attachedThreads
-                = windowsRadixTreeCreate(winCThreadsNullFunction);
+                = radixTreeCreate(winCThreadsNullFunction);
             if (attachedThreads == NULL) {
                 LOG_MALLOC_FAILURE();
                 exit(1);
@@ -1143,7 +686,7 @@ int thrd_create(thrd_t* thr, thrd_start_t func, void* arg) {
             }
         }
 
-        windowsRadixTreeSetValue(
+        radixTreeSetValue(
             attachedThreads, thr, sizeof(*thr), threadHandle);
     } else {
         returnValue = thrd_error;
@@ -1162,11 +705,11 @@ int thrd_detach(thrd_t thr) {
     int returnValue = thrd_success;
     HANDLE threadHandle = NULL;
 
-    threadHandle = (HANDLE) windowsRadixTreeGetValue(
+    threadHandle = (HANDLE) radixTreeGetValue(
         attachedThreads, &thr, sizeof(thr));
     if (threadHandle != NULL) {
         CloseHandle(threadHandle);
-        windowsRadixTreeDeleteValue(attachedThreads, &thr, sizeof(thr));
+        radixTreeDeleteValue(attachedThreads, &thr, sizeof(thr));
     }
     else {
         returnValue = thrd_error;
@@ -1181,12 +724,18 @@ int thrd_equal(thrd_t thr0, thrd_t thr1) {
 
 void thrd_exit(int res) {
     printLog(TRACE, "ENTER thrd_exit(res=%d)\n", res);
+    thrd_t thisThread = thrd_current();
 
     // Destroy all the thread local storage.
     if (tssMetadataInitialized == true) {
-        thrd_t thisThread = thrd_current();
-        windowsRadixTreeDeleteValue(
+        radixTreeDeleteValue(
             tssStorageByThread, &thisThread, sizeof(thisThread));
+    }
+
+    // Destroy the message queue for this thread.
+    if (thrd_msg_q_destroy(NULL) != thrd_success) {
+        printLog(WARN, "Could not destroy message queue for thread %d.\n",
+             thisThread);
     }
 
     printLog(TRACE, "EXIT thrd_exit(res=%d) = {}\n", res);
@@ -1195,7 +744,7 @@ void thrd_exit(int res) {
 
 int thrd_join(thrd_t thr, int* res) {
     int returnValue = thrd_success;
-    HANDLE threadHandle = (HANDLE) windowsRadixTreeGetValue(
+    HANDLE threadHandle = (HANDLE) radixTreeGetValue(
         attachedThreads, &thr, sizeof(thr));
 
     if (threadHandle != NULL) {
@@ -1217,7 +766,7 @@ int thrd_join(thrd_t thr, int* res) {
             returnValue = thrd_error;
         }
 
-        windowsRadixTreeDeleteValue(attachedThreads, &thr, sizeof(thr));
+        radixTreeDeleteValue(attachedThreads, &thr, sizeof(thr));
         CloseHandle(threadHandle);
     }
     else {
@@ -1250,7 +799,7 @@ void thrd_yield(void) {
 
 int thrd_terminate(thrd_t thr) {
     int returnValue = thrd_success;
-    HANDLE threadHandle = (HANDLE) windowsRadixTreeGetValue(
+    HANDLE threadHandle = (HANDLE) radixTreeGetValue(
       attachedThreads, &thr, sizeof(thr));
 
     if (threadHandle != NULL) {
@@ -1266,6 +815,7 @@ int thrd_terminate(thrd_t thr) {
     return returnValue;
 }
 
+/**/
 /// @fn int timespec_get(struct timespec* spec, int base)
 ///
 /// @brief Get the system time in seconds and nanoseconds.
@@ -1293,6 +843,7 @@ int timespec_get(struct timespec* spec, int base) {
 
     return base;
 }
+/**/
 
 #endif // _WIN32
 

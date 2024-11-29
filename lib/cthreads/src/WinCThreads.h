@@ -140,5 +140,8 @@ int timespec_get(struct timespec* spec, int base);
 } // extern "C"
 #endif
 
+// CThreadsMessages.h has to be included last.
+#include "CThreadsMessages.h"
+
 #endif // WIN_C_THREADS_H
 
