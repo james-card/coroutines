@@ -105,17 +105,51 @@ extern "C"
 #define COROUTINE_ID_TYPE int64_t
 #endif
 
+/// @def COROUTINE_ID_TYPE_int64_t_int64_t
+///
+/// @brief Define that gets matched when COROUTINE_ID_TYPE is an int64_t.
+#define COROUTINE_ID_TYPE_int64_t_int64_t 1
+
+/// @def COROUTINE_ID_TYPE_int32_t_int32_t
+///
+/// @brief Define that gets matched when COROUTINE_ID_TYPE is an int32_t.
+#define COROUTINE_ID_TYPE_int32_t_int32_t 1
+
+/// @def COROUTINE_ID_TYPE_int16_t_int16_t
+///
+/// @brief Define that gets matched when COROUTINE_ID_TYPE is an int16_t.
+#define COROUTINE_ID_TYPE_int16_t_int16_t 1
+
+/// @def COROUTINE_ID_TYPE_int8_t_int8_t
+///
+/// @brief Define that gets matched when COROUTINE_ID_TYPE is an int8_t.
+#define COROUTINE_ID_TYPE_int8_t_int8_t   1
+
+/// @def EXPAND_COROUTINE_ID_TYPE
+///
+/// @brief Second-level macro to fully expand the types passed into
+/// TEST_COROUTINE_ID_TYPE.
+#define EXPAND_COROUTINE_ID_TYPE(type1, type2) \
+  COROUTINE_ID_TYPE_##type1##_##type2
+
+/// @def TEST_COROUTINE_ID_TYPE
+///
+/// @brief Determine if the type specified by type1 matches the type specified
+/// by type2.
+#define TEST_COROUTINE_ID_TYPE(type1, type2) \
+  EXPAND_COROUTINE_ID_TYPE(type1, type2)
+
 /// @def COROUTINE_ID_NOT_SET
 ///
 /// @brief Special value to indicate that a coroutine's ID value is not set.
 /// This is the initial value just after the coroutine constructor completes.
-#if COROUTINE_ID_TYPE == int64_t
+#if TEST_COROUTINE_ID_TYPE(COROUTINE_ID_TYPE, int64_t)
 #define COROUTINE_ID_NOT_SET ((int64_t) 0x8000000000000000)
-#elif COROUTINE_ID_TYPE == int32_t
+#elif TEST_COROUTINE_ID_TYPE(COROUTINE_ID_TYPE, int32_t)
 #define COROUTINE_ID_NOT_SET ((int32_t) 0x80000000)
-#elif COROUTINE_ID_TYPE == int16_t
+#elif TEST_COROUTINE_ID_TYPE(COROUTINE_ID_TYPE, int16_t)
 #define COROUTINE_ID_NOT_SET ((int16_t) 0x8000)
-#elif COROUTINE_ID_TYPE == int8_t
+#elif TEST_COROUTINE_ID_TYPE(COROUTINE_ID_TYPE, int8_t)
 #define COROUTINE_ID_NOT_SET ((int8_t) 0x80)
 #else
 #error "Invalid COROUTINE_ID_TYPE."
@@ -148,13 +182,67 @@ typedef void* (*CoroutineFunction)(void *arg);
 /// @param func The function pointer portion of the pointer value.
 /// @param data The data pointer portion of the pointer value.
 typedef union CoroutineFuncData {
-  void* (*func)(void*);
-  void* data;
+  CoroutineFunction func;
+  void *data;
 } CoroutineFuncData;
 
 // Forward declarations.  Doxygen below.
 typedef struct Comutex Comutex;
+typedef struct Cocondition Cocondition;
+typedef struct Coroutine Coroutine;
 typedef struct Comessage Comessage;
+
+// Coroutine mutex support.
+
+// Comutex types
+#define comutexPlain     0
+#define comutexRecursive 1
+#define comutexTimed     2
+
+/// @struct Comutex
+///
+/// @brief Definition for a coroutine mutex to provide mutual exclusion between
+/// coroutines.
+///
+/// @param lastYieldValue The last value returned by a yield call if a comutex
+///   lock function blocked while acquiring the lock, or NULL if the lock was
+///   acquired on the first attempt.
+/// @param type The type of the mutex (see above type definitions)
+/// @param coroutine The coroutine that has the lock.
+/// @param recursionLevel The number of times this mutex has been successfully
+///   locked in this coroutine.
+typedef struct Comutex {
+  void *lastYieldValue;
+  int type;
+  Coroutine *coroutine;
+  int recursionLevel;
+} Comutex;
+
+// Coroutine condition support.
+
+/// @struct Cocondition
+///
+/// @brief Definition for a coroutine condition for signaling between
+/// coroutines.
+///
+/// @param lastYieldValue The last value returned by a yield call while a
+///   cocondition wait function was blocked.
+/// @param numWaiters The number of coroutines blocked waiting on this
+///   condition.
+/// @param numSignal The number of signals emitted for unblocking waiting
+///   coroutines.
+/// @param head The head of the coroutine queue (the next coroutine to signal).
+/// @param tail The tail of the coroutine queue (where the next waiting
+///   coroutine will be added).
+typedef struct Cocondition {
+  void *lastYieldValue;
+  int numWaiters;
+  int numSignals;
+  Coroutine *head;
+  Coroutine *tail;
+} Cocondition;
+
+// Coroutine base support.
 
 /// @struct Coroutine
 ///
@@ -169,8 +257,13 @@ typedef struct Comessage Comessage;
 ///   signal.
 /// @param passed The CoroutineFuncData that's passed between contexts by the
 ///   coroutinePass function (on a yield or resume call).
-/// @param nextMessage The next message that is waiting for the coroutine to
-///   process.
+/// @param nextMessage A pointer to the next message that is waiting for the
+///   coroutine to process.
+/// @param lastMessage A pointer to the last message that is waiting for the
+///   coroutine to process.
+/// @param messageCondition A condition (Cocondition) that will allow for
+///   signalling between coroutines when adding a message to the queue.
+/// @param messageLock A mutex (Comutex) to guard the message condition.
 typedef struct Coroutine {
   struct Coroutine *next;
   jmp_buf context;
@@ -181,7 +274,50 @@ typedef struct Coroutine {
   jmp_buf resetContext;
   CoroutineFuncData passed;
   Comessage *nextMessage;
+  Comessage *lastMessage;
+  Cocondition messageCondition;
+  Comutex messageLock;
 } Coroutine;
+
+// Coroutine message support.
+
+/// @struct Comessage
+///
+/// @brief Definition for a coroutine message that can be pushed onto a
+/// Coroutine's message queue.
+///
+/// @param type Integer value designating the type of message for the receiving
+///   coroutine.
+/// @param data A pointer to the data of the message, if any.
+/// @param size The number of bytes pointed to by the data pointer.
+/// @param next A pointer to the next Comessage in a coroutine's message queue.
+/// @param waiting A Boolean flag to indicate whether or not the sender is
+///   waiting on a response message from the recipient of the message.
+/// @param done A Boolean flag to indicate whether or not the receiving
+///   coroutine has handled the message yet.
+/// @param inUse A Boolean flag to indicate whether or not this Comessage is in
+///   in use.
+/// @param from A pointer to the Coroutine instance for the sending coroutine.
+/// @param to A pointer to the Coroutine instance for the receiving coroutine.
+/// @param condition A condition (Cocondition) that will allow for signalling
+///   between coroutines when setting the done flag.
+/// @param lock A mutex (Comutex) to guard the condition.
+/// @param configured Whether or not the members of the message that requrie
+///   initializatoin have been configured yet.
+typedef struct Comessage {
+  int type;
+  void *data;
+  size_t size;
+  struct Comessage *next;
+  bool waiting;
+  bool done;
+  bool inUse;
+  Coroutine *from;
+  Coroutine *to;
+  Cocondition condition;
+  Comutex lock;
+  bool configured;
+} Comessage;
 
 /// @def coroutineResumable(coroutinePointer)
 ///
@@ -219,6 +355,7 @@ typedef struct Coroutine {
   (((coroutinePointer) != NULL) \
     && ((coroutinePointer)->state != COROUTINE_STATE_NOT_RUNNING))
 
+
 // Coroutine function prototypes.  Doxygen inline in source file.
 int coroutineConfig(Coroutine *first, int stackSize);
 Coroutine* coroutineCreate(CoroutineFunction func);
@@ -234,109 +371,68 @@ bool coroutineThreadingSupportEnabled();
 int coroutineTerminate(Coroutine *targetCoroutine, Comutex **mutexes);
 
 
-// Coroutine mutex support.
-
-// Comutex types
-#define comutexPlain     0
-#define comutexRecursive 1
-#define comutexTimed     2
-
-/// @struct Comutex
-///
-/// @brief Definition for a coroutine mutex to provide mutual exclusion between
-/// coroutines.
-///
-/// @param lastYieldValue The last value returned by a yield call if a comutex
-///   lock function blocked while acquiring the lock, or NULL if the lock was
-///   acquired on the first attempt.
-/// @param type The type of the mutex (see above type definitions)
-/// @param coroutine The coroutine that has the lock.
-/// @param recursionLevel The number of times this mutex has been successfully
-///   locked in this coroutine.
-typedef struct Comutex {
-  void *lastYieldValue;
-  int type;
-  Coroutine *coroutine;
-  int recursionLevel;
-} Comutex;
-
 // Coroutine mutex function prototypes.  Doxygen inline in source file.
 int comutexInit(Comutex *mtx, int type);
 int comutexLock(Comutex *mtx);
 int comutexUnlock(Comutex *mtx);
 void comutexDestroy(Comutex *mtx);
-int comutexTimedlock(Comutex *mtx, const struct timespec *ts);
-int comutexTrylock(Comutex *mtx);
+int comutexTimedLock(Comutex *mtx, const struct timespec *ts);
+int comutexTryLock(Comutex *mtx);
 void* comutexLastYieldValue(Comutex *mtx);
 
-
-// Coroutine condition support.
-
-/// @struct Cocondition
-///
-/// @brief Definition for a coroutine condition for signaling between
-/// coroutines.
-///
-/// @param lastYieldValue The last value returned by a yield call while a
-///   cocondition wait function was blocked.
-/// @param numWaiters The number of coroutines blocked waiting on this
-///   condition.
-/// @param numSignal The number of signals emitted for unblocking waiting
-///   coroutines.
-/// @param head The head of the coroutine queue (the next coroutine to signal).
-/// @param tail The tail of the coroutine queue (where the next waiting
-///   coroutine will be added).
-typedef struct Cocondition {
-  void *lastYieldValue;
-  int numWaiters;
-  int numSignals;
-  Coroutine *head;
-  Coroutine *tail;
-} Cocondition;
 
 // Coroutine condition function prototypes.  Doxygen inline in source file.
 int coconditionBroadcast(Cocondition *cond);
 void coconditionDestroy(Cocondition *cond);
 int coconditionInit(Cocondition *cond);
 int coconditionSignal(Cocondition *cond);
-int conditionTimedwait(Cocondition *cond, Comutex *mtx,
+int coconditionTimedWait(Cocondition *cond, Comutex *mtx,
   const struct timespec *ts);
 int coconditionWait(Cocondition *cond, Comutex *mtx);
 void* coconditionLastYieldValue(Cocondition *cond);
 
 
-// Coroutine message support.
+// Comessage queue functions
+int comessageQueueDestroy(Coroutine *coroutine);
+Comessage* comessageQueuePeek(void);
+Comessage* comessageQueuePop(void);
+Comessage* comessageQueuePopType(int type);
+Comessage* comessageQueueWait(const struct timespec *ts);
+Comessage* comessageQueueWaitForType(int type, const struct timespec *ts);
+int comessageQueuePush(Coroutine *coroutine, Comessage *comessage);
 
-/// @struct Comessage
-///
-/// @brief Definition for a coroutine message that can be pushed onto a
-/// Coroutine's message queue.
-///
-/// @param type Integer value designating the type of message for the receiving
-///   coroutine.
-/// @param data A pointer to the message data for the destination coroutine.
-/// @param storage 64-bits of storage for a small message.
-/// @param next A pointer to the next Comessage in a coroutine's message queue.
-/// @param handled A boolean flag to indicate whether or not the receiving
-///   coroutine has handled the message yet.
-/// @param inUse A boolean flag to indicate whether or not this Comessage is in
-///   in use.
-/// @param from A pointer to the Coroutine instance for the sending coroutine.
-typedef struct Comessage {
-  int type;
-  CoroutineFuncData funcData;
-  uint8_t storage[sizeof(uint64_t)];
-  struct Comessage *next;
-  bool handled;
-  bool inUse;
-  Coroutine *from;
-} Comessage;
 
-// Coroutine message function prototypes.  Doxygen inline in source file.
-Comessage* comessagePeek(Coroutine *coroutine);
-Comessage* comessagePop(Coroutine *coroutine);
-Comessage* comessagePopType(Coroutine *coroutine, int type);
-int comessagePush(Coroutine *coroutine, Comessage *comessage);
+// Comessage functions
+int comessageDestroy(Comessage *comessage);
+int comessageInit(
+  Comessage *comessage, int type, void *data, size_t size, bool waiting);
+int comessageRelease(Comessage *comessage);
+int comessageSetDone(Comessage *comessage);
+int comessageWaitForDone(Comessage *comessage, const struct timespec *ts);
+Comessage* comessageWaitForReply(Comessage *sent, bool releaseAfterDone,
+  const struct timespec *ts);
+Comessage* comessageWaitForReplyWithType(Comessage *sent, bool releaseAfterDone,
+  int type, const struct timespec *ts);
+
+
+// Comessage accessors
+#define comessageType(comessagePointer) \
+  (((comessagePointer) != NULL) ? (comessagePointer)->type : 0)
+#define comessageData(comessagePointer) \
+  (((comessagePointer) != NULL) ? (comessagePointer)->data : NULL)
+// No accessor for next member element.
+#define comessageWaiting(comessagePointer) \
+  (((comessagePointer) != NULL) ? (comessagePointer)->waiting : false)
+#define comessageDone(comessagePointer) \
+  (((comessagePointer) != NULL) ? (comessagePointer)->done : true)
+#define comessageInUse(comessagePointer) \
+  (((comessagePointer) != NULL) ? (comessagePointer)->inUse : false)
+#define comessageFrom(comessagePointer) \
+  (((comessagePointer) != NULL) ? (comessagePointer)->from : NULL)
+#define comessageTo(comessagePointer) \
+  (((comessagePointer) != NULL) ? (comessagePointer)->to : NULL)
+#define comessageConfigured(comessagePointer) \
+  (((comessagePointer) != NULL) ? (comessagePointer)->configured : false)
 
 
 #ifdef __cplusplus
