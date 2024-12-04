@@ -635,7 +635,7 @@ int thrd_msg_init(
   msg->waiting = waiting;
   msg->done = false;
   // No need to set msg->in_use since we called thrd_msg_start_use above.
-  msg->from = thrd_current();
+  // Don't touch msg->from in case this message is being reused.
   return_value = thrd_success;
   
   return return_value;
@@ -720,19 +720,23 @@ int thrd_msg_set_done(thrd_msg_t *msg) {
     if (msg->waiting == true) {
       // Something is waiting.  Signal the waiters.  It will be up to them to
       // destroy this message again later.
-      cnd_broadcast(&msg->condition);
+      if (cnd_broadcast(&msg->condition) == thrd_success) {
+        return_value = thrd_success;
+      } // else return_value remains thrd_error.
+    } else {
+      return_value = thrd_success;
     }
     mtx_unlock(&msg->lock);
   } else {
     // Nothing we can do but set the done flag.
     msg->done = true;
+    return_value = thrd_success;
   }
   // Don't touch msg->from.
   // Don't touch msg->condition.
   // Don't touch msg->lock.
   // Don't touch msg->configured.
   // Don't touch msg->dynamically_allocated.
-  return_value = thrd_success;
   
   return return_value;
 }
@@ -837,22 +841,24 @@ thrd_msg_t* thrd_msg_wait_for_reply_with_type_(
   if (sent == NULL) {
     // Invalid.
     return reply; // NULL
-  } else if (thrd_msg_wait_for_done(sent, ts) != thrd_success) {
+  }
+
+  // We need to grab the original recipient of the message that was sent before
+  // we wait for done in case the recipient reuses this message as the reply.
+  thrd_t recipient = sent->to;
+
+  if (thrd_msg_wait_for_done(sent, ts) != thrd_success) {
     // Invalid state of the message.  Fail.
     return reply; // NULL
   }
 
-  // Recipient has processed the message.  We now need to wait for their reply.
-  // Any message is valid as long as its from the recipient of the original
-  // message.
-  thrd_t recipient = sent->to;
   if (release == true) {
     // We're done with the message that was originally sent and the caller has
     // indicated that it is to be released now.
     thrd_msg_release(sent);
   }
 
-  // Enter our main wait loop.
+  // Recipient has processed the message.  We now need to wait for their reply.
   int lockStatus = thrd_success;
   if (ts == NULL) {
     lockStatus = mtx_lock(&queue->lock);
@@ -875,6 +881,8 @@ thrd_msg_t* thrd_msg_wait_for_reply_with_type_(
     // of the loop below.
     searchType = *type;
   }
+
+  // Enter our main wait loop.
   int waitStatus = thrd_success;
   while (reply == NULL) {
     while ((cur != NULL)

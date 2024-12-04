@@ -111,6 +111,8 @@ thrd_msg_t* thrd_msg_wait_for_reply_with_type(thrd_msg_t *sent, bool release, in
   (((thrd_msg_ptr) != NULL) ? (thrd_msg_ptr)->type : 0)
 #define thrd_msg_data(thrd_msg_ptr) \
   (((thrd_msg_ptr) != NULL) ? (thrd_msg_ptr)->data : NULL)
+#define thrd_msg_size(thrd_msg_ptr) \
+  (((thrd_msg_ptr) != NULL) ? (thrd_msg_ptr)->size : 0)
 // No accessor for next member element.
 #define thrd_msg_waiting(thrd_msg_ptr) \
   (((thrd_msg_ptr) != NULL) ? (thrd_msg_ptr)->waiting : false)
