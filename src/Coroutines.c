@@ -186,6 +186,37 @@ static Coroutine* _globalIdle = NULL;
 /// @brief The size of each coroutine's stack in bytes.
 static int _globalStackSize = COROUTINE_DEFAULT_STACK_SIZE;
 
+/// @var static ComutexUnlockCallback _globalComutexUnlockCallback
+///
+/// @brief Global callback to call when a comutex is unlocked.
+static ComutexUnlockCallback _globalComutexUnlockCallback = NULL;
+
+/// @var static CoconditionSignalCallback _globalComessageSignalCallback
+///
+/// @brief Global callback to call when a cocondition is signalled.
+static CoconditionSignalCallback _globalCoconditionSignalCallback = NULL;
+
+/// @fn int64_t coroutinesGetNanoseconds(const struct timespec *ts)
+///
+/// @brief Convert the time in a timespec to a raw number of nanoseconds.
+///
+/// @param ts A pointer to the struct timespec to convert.  If this value is
+///   NULL, the current time will be used.
+///
+/// @return Returns the number of nanoseconds since midnight, Jan 1, 1970
+/// represented by the timespec.
+int64_t coroutinesGetNanoseconds(const struct timespec *ts) {
+  struct timespec timespecStorage = { 0, 0 };
+
+  if (ts == NULL) {
+    timespec_get(&timespecStorage, TIME_UTC);
+    ts = &timespecStorage;
+  }
+
+  return (((int64_t) ts->tv_sec) * ((int64_t) 1000000000))
+         + ((int64_t) ts->tv_nsec);
+}
+
 /// @fn void coroutineGlobalPush(Coroutine **list, Coroutine *coroutine)
 ///
 /// @brief Add a coroutine to a global list and get the previous head of the
@@ -261,6 +292,16 @@ ZEROINIT(static tss_t _tssIdle);
 /// @brief Thread-specific size of each coroutine's stack, in bytes.
 ZEROINIT(static tss_t _tssStackSize);
 
+/// @var static ComutexUnlockCallback _tssComutexUnlockCallback
+///
+/// @brief Thread-specific callback to call when a cocondition is signalled.
+ZEROINIT(static ComutexUnlockCallback _tssComutexUnlockCallback);
+
+/// @var static CoconditionSignalCallback _tssCoconditionSignalCallback
+///
+/// @brief Thread-specific callback to call when a cocondition is signalled.
+ZEROINIT(static CoconditionSignalCallback _tssCoconditionSignalCallback);
+
 /// @var static once_flag _threadMetadataSetup
 ///
 /// @brief once_flag to make sure we only initialize the thread-specific storage
@@ -273,10 +314,6 @@ static once_flag _threadMetadataSetup = ONCE_FLAG_INIT;
 ///
 /// @return This function returns no value.
 void coroutineSetupThreadMetadata(void) {
-  // _first is the only Coroutine node that will be allocated with dynamic
-  // memory, so it's the only one that needs a destructor.  All the other
-  // nodes on the _running and _idle lists will be on the stack and do not
-  // need destructors.
   int status = tss_create(&_tssFirst, NULL);
   if (status != thrd_success) {
     fprintf(stderr, "Could not initialize _tssFirst.\n");
@@ -292,6 +329,14 @@ void coroutineSetupThreadMetadata(void) {
   status = tss_create(&_tssStackSize, NULL);
   if (status != thrd_success) {
     fprintf(stderr, "Could not initialize _tssStackSize.\n");
+  }
+  status = tss_create(&_tssComutexUnlockCallback, NULL);
+  if (status != thrd_success) {
+    fprintf(stderr, "Could not initialize _tssComutexUnlockCallback.\n");
+  }
+  status = tss_create(&_tssCoconditionSignalCallback, NULL);
+  if (status != thrd_success) {
+    fprintf(stderr, "Could not initialize _tssCoconditionSignalCallback.\n");
   }
 }
 
@@ -342,6 +387,26 @@ bool coroutineInitializeThreadMetadata(Coroutine *first) {
     fprintf(stderr,
       "Could not set _tssStackSize to %d in "
       "coroutineInitializeThreadMetadata.\n", _globalStackSize);
+    return false;
+  }
+  status = tss_set(
+    _tssComutexUnlockCallback,
+    _globalComutexUnlockCallback
+  );
+  if (status != thrd_success) {
+    fprintf(stderr,
+      "Could not set _tssComutexUnlockCallback to %p in "
+      "coroutineInitializeThreadMetadata.\n", _globalComutexUnlockCallback);
+    return false;
+  }
+  status = tss_set(
+    _tssCoconditionSignalCallback,
+    _globalCoconditionSignalCallback
+  );
+  if (status != thrd_success) {
+    fprintf(stderr,
+      "Could not set _tssCoconditionSignalCallback to %p in "
+      "coroutineInitializeThreadMetadata.\n", _globalCoconditionSignalCallback);
     return false;
   }
 
@@ -671,6 +736,12 @@ Coroutine* coroutineCreate(void* func(void *arg)) {
   // passed to this function.
   funcData = coroutinePass(currentCoroutine, funcData);
   newCoroutine = (Coroutine*) funcData.data;
+  newCoroutine->nextToSignal = NULL;
+  newCoroutine->prevToSignal = NULL;
+  newCoroutine->blockingCocondition = NULL;
+  newCoroutine->nextToLock = NULL;
+  newCoroutine->prevToLock = NULL;
+  newCoroutine->blockingComutex = NULL;
 
   return newCoroutine;
 }
@@ -863,9 +934,6 @@ int coroutineTerminate(Coroutine *targetCoroutine, Comutex **mutexes) {
     return coroutineSuccess;
   }
 
-  // Destroy any messages that were sent.
-  comessageQueueDestroy(targetCoroutine);
-
   // Remove the target coroutine from the running stack if applicable.
   Coroutine* running = _globalRunning;
 #ifdef THREAD_SAFE_COROUTINES
@@ -927,12 +995,57 @@ int coroutineTerminate(Coroutine *targetCoroutine, Comutex **mutexes) {
   }
 
   // Remove the coroutine from any condition it was waiting on.
-  if (targetCoroutine->prevToSignal != NULL) {
-    targetCoroutine->prevToSignal->nextToSignal = targetCoroutine->nextToSignal;
+  Cocondition *cond = targetCoroutine->blockingCocondition;
+  if (cond != NULL) {
+    Coroutine **cur = &cond->head;
+    while ((*cur != NULL) && (*cur != targetCoroutine)) {
+      cur = &((*cur)->nextToSignal);
+    }
+    *cur = targetCoroutine->nextToSignal;
+    if (cond->head == NULL) {
+      // Empty queue.
+      cond->tail = NULL;
+    }
+    if (cond->tail == targetCoroutine) {
+      cond->tail = targetCoroutine->prevToSignal;
+    }
+    cond->numWaiters--;
   }
+  // targetCoroutine->prevToSignal->nextToSignal is taken care of above.
   if (targetCoroutine->nextToSignal != NULL) {
     targetCoroutine->nextToSignal->prevToSignal = targetCoroutine->prevToSignal;
   }
+  if (targetCoroutine->prevToSignal != NULL) {
+    targetCoroutine->prevToSignal->nextToSignal = targetCoroutine->nextToSignal;
+  }
+  targetCoroutine->nextToSignal = NULL;
+  targetCoroutine->prevToSignal = NULL;
+  targetCoroutine->blockingCocondition = NULL;
+
+  Comutex *mtx = targetCoroutine->blockingComutex;
+  if (mtx != NULL) {
+    Coroutine **cur = &mtx->head;
+    while ((*cur != NULL) && (*cur != targetCoroutine)) {
+      cur = &((*cur)->nextToLock);
+    }
+    *cur = targetCoroutine->prevToLock;
+  }
+  // targetCoroutine->prevToLock->nextToLock is taken care of above.
+  if (targetCoroutine->nextToLock != NULL) {
+    targetCoroutine->nextToLock->prevToLock = targetCoroutine->prevToLock;
+  }
+  if (targetCoroutine->prevToLock != NULL) {
+    targetCoroutine->prevToLock->nextToLock = targetCoroutine->nextToLock;
+  }
+  targetCoroutine->nextToLock = NULL;
+  targetCoroutine->prevToLock = NULL;
+  targetCoroutine->blockingComutex = NULL;
+
+  // Destroy any messages that were sent.
+  // NOTE:  This must be done after we've taken care of the signals and mutexes
+  // above because the coroutine may have been waiting on a message, in which
+  // case its message queue mutex and condition will have been in use.
+  comessageQueueDestroy(targetCoroutine);
 
   return coroutineSuccess;
 }
@@ -943,7 +1056,7 @@ int coroutineTerminate(Coroutine *targetCoroutine, Comutex **mutexes) {
 ///
 /// @param coroutine A pointer to the coroutine whose ID is to be set.  If this
 ///   value is NULL then the ID of the currently running coroutine will be set.
-/// @param id A signed integer to set as the coroutine's ID.
+/// @param id An unsigned integer to set as the coroutine's ID.
 ///
 /// @return This function always returns coroutineSuccess.
 int coroutineSetId(Coroutine* coroutine, COROUTINE_ID_TYPE id) {
@@ -1027,7 +1140,7 @@ bool coroutineThreadingSupportEnabled() {
 
 #endif // THREAD_SAFE_COROUTINES
 
-/// @fn int coroutineConfig(Coroutine *first, int stackSize)
+/// @fn int coroutineConfig(Coroutine *first, int stackSize, ComutexUnlockCallback comutexUnlockCallback, CoconditionSignalCallback coconditionSignalCallback)
 ///
 /// @brief Configure the global or thread-specific defaults for all coroutines
 /// allocated by the current thread.
@@ -1036,9 +1149,14 @@ bool coroutineThreadingSupportEnabled() {
 /// @param stackSize The desired minimum size of a coroutine's stack, in bytes.
 ///   If this value is less than COROUTINE_STACK_CHUNK_SIZE,
 ///   COROUTINE_DEFAULT_STACK_SIZE will be used.
+/// @param coconditionSignalCallback The callback that is to be used whenever
+///   a coconditon is signalled.  This parameter may be NULL.
 ///
 /// @return Returns coroutineSuccess on success, coroutineError on error.
-int coroutineConfig(Coroutine *first, int stackSize) {
+int coroutineConfig(Coroutine *first, int stackSize,
+  ComutexUnlockCallback comutexUnlockCallback,
+  CoconditionSignalCallback coconditionSignalCallback
+) {
   if (stackSize < COROUTINE_STACK_CHUNK_SIZE) {
     stackSize = COROUTINE_DEFAULT_STACK_SIZE;
   }
@@ -1085,10 +1203,16 @@ int coroutineConfig(Coroutine *first, int stackSize) {
         return coroutineError;
     }
     tss_set(_tssStackSize, (void*) ((intptr_t) stackSize));
+    tss_set(_tssComutexUnlockCallback, coconditionSignalCallback);
+    tss_set(_tssCoconditionSignalCallback, coconditionSignalCallback);
   }
 #endif // THREAD_SAFE_COROUTINES
   if (first != NULL) {
     memset(first, 0, sizeof(Coroutine));
+    // This function is called from what will become the main coroutine (pointed
+    // to by the first pointer), so by definition, it's running.  Mark it as
+    // such.
+    first->state = COROUTINE_STATE_RUNNING;
     _globalFirst = first;
     _globalRunning = first;
   } else if (_globalFirst == NULL) {
@@ -1097,6 +1221,8 @@ int coroutineConfig(Coroutine *first, int stackSize) {
     return coroutineError;
   }
   _globalStackSize = stackSize;
+  _globalComutexUnlockCallback = comutexUnlockCallback;
+  _globalCoconditionSignalCallback = coconditionSignalCallback;
 
   return coroutineSuccess;
 }
@@ -1130,7 +1256,7 @@ int comutexInit(Comutex *mtx, int type) {
 /// @brief Lock a coroutine mutex.
 ///
 /// @details This function blocks the current coroutine, yielding each time it
-/// tries and fails to acquire the lock.  The special value COROUTINE_BLOCKED
+/// tries and fails to acquire the lock.  The special value COROUTINE_WAIT
 /// will be yielded to the caller each time control is yielded.
 ///
 /// @param mtx A pointer to the coroutine mutex to lock.
@@ -1146,8 +1272,49 @@ int comutexLock(Comutex *mtx) {
   // Clear the lastYieldValue before we do anything else.
   mtx->lastYieldValue = NULL;
 
+  Coroutine* running = _globalRunning;
+#ifdef THREAD_SAFE_COROUTINES
+  if (_coroutineThreadingSupportEnabled) {
+    call_once(&_threadMetadataSetup, coroutineSetupThreadMetadata);
+    if (!coroutineInitializeThreadMetadata(NULL)) {
+      return coroutineError;
+    }
+    running = (Coroutine*) tss_get(_tssRunning);
+  }
+#endif
+
+  if (running == NULL) {
+    // running stack not setup yet.  Bail.
+    return coroutineError;
+  }
+
+  // Push ourselves onto the queue.
+  running->nextToLock = NULL;
+  Coroutine *prev = NULL;
+  Coroutine **cur = &mtx->head;
+  while (*cur != NULL) {
+    prev = *cur;
+    cur = &((*cur)->nextToLock);
+  }
+  *cur = running;
+  running->prevToLock = prev;
+
+  running->blockingComutex = mtx;
   while (comutexTryLock(mtx) != coroutineSuccess) {
-    mtx->lastYieldValue = coroutineYield(COROUTINE_BLOCKED);
+    mtx->lastYieldValue = coroutineYield(COROUTINE_WAIT);
+  }
+  running->blockingComutex = NULL;
+
+  // Remove ourselves from the queue.
+  prev = NULL;
+  cur = &mtx->head;
+  while (*cur != running) {
+    prev = *cur;
+    cur = &((*cur)->nextToLock);
+  }
+  *cur = running->nextToLock;
+  if (running->nextToLock != NULL) {
+    running->nextToLock->prevToLock = prev;
   }
 
   return coroutineSuccess;
@@ -1187,6 +1354,20 @@ int comutexUnlock(Comutex *mtx) {
     mtx->recursionLevel--;
     if (mtx->recursionLevel == 0) {
       mtx->coroutine = NULL;
+
+      ComutexUnlockCallback comutexUnlockCallback
+        = _globalComutexUnlockCallback;
+#ifdef THREAD_SAFE_COROUTINES
+      if (_coroutineThreadingSupportEnabled) {
+        // No need to call coroutineSetupThreadMetadata or
+        // coroutineInitializeThreadMetadata this time since we did that above.
+        comutexUnlockCallback
+          = (ComutexUnlockCallback*) tss_get(_tssComutexUnlockCallback);
+      }
+#endif
+      if (comutexUnlockCallback != NULL) {
+        comutexUnlockCallback(mtx);
+      }
     }
   } else {
     returnValue = coroutineError;
@@ -1230,6 +1411,8 @@ int comutexTimedLock(Comutex *mtx, const struct timespec *ts) {
     // Cannot honor the request.
     return coroutineError;
   }
+  int64_t now = coroutinesGetNanoseconds(NULL);
+  int64_t delayTime = now + coroutinesGetNanoseconds(ts);
 
   // Clear the lastYieldValue before we do anything else.
   mtx->lastYieldValue = NULL;
@@ -1239,24 +1422,55 @@ int comutexTimedLock(Comutex *mtx, const struct timespec *ts) {
     return coroutineError;
   }
 
+  Coroutine* running = _globalRunning;
+#ifdef THREAD_SAFE_COROUTINES
+  if (_coroutineThreadingSupportEnabled) {
+    call_once(&_threadMetadataSetup, coroutineSetupThreadMetadata);
+    if (!coroutineInitializeThreadMetadata(NULL)) {
+      return coroutineError;
+    }
+    running = (Coroutine*) tss_get(_tssRunning);
+  }
+#endif
+
+  if (running == NULL) {
+    // running stack not setup yet.  Bail.
+    return coroutineError;
+  }
+
+  // Push ourselves onto the queue.
+  running->nextToLock = NULL;
+  Coroutine *prev = NULL;
+  Coroutine **cur = &mtx->head;
+  while (*cur != NULL) {
+    prev = *cur;
+    cur = &((*cur)->nextToLock);
+  }
+  *cur = running;
+  running->prevToLock = prev;
+
   int returnValue = comutexTryLock(mtx);
+  running->blockingComutex = mtx;
   while (returnValue != coroutineSuccess) {
-    struct timespec now;
-    if (timespec_get(&now, TIME_UTC) == 0) {
-      uint64_t nowns = (now.tv_sec * 1000000000) + now.tv_nsec;
-      uint64_t tsns = (ts->tv_sec * 1000000000) + ts->tv_nsec;
-      if (nowns > tsns) {
-        returnValue = coroutineTimedout;
-        break;
-      }
-      mtx->lastYieldValue = coroutineYield(COROUTINE_BLOCKED);
-      returnValue = comutexTryLock(mtx);
-    } else {
-      // timespec_get returned an error.  We have no valid time to wait.  We've
-      // already tried to lock once and that's the best we can do.
-      returnValue = coroutineError;
+    if (coroutinesGetNanoseconds(NULL) > delayTime) {
+      returnValue = coroutineTimedout;
       break;
     }
+    mtx->lastYieldValue = coroutineYield(COROUTINE_TIMEDWAIT);
+    returnValue = comutexTryLock(mtx);
+  }
+  running->blockingComutex = NULL;
+
+  // Remove ourselves from the queue.
+  prev = NULL;
+  cur = &mtx->head;
+  while (*cur != running) {
+    prev = *cur;
+    cur = &((*cur)->nextToLock);
+  }
+  *cur = running->nextToLock;
+  if (running->nextToLock != NULL) {
+    running->nextToLock->prevToLock = prev;
   }
 
   return returnValue;
@@ -1294,6 +1508,8 @@ int comutexTryLock(Comutex *mtx) {
   if (running == NULL) {
     // running stack not setup yet.  Bail.
     return coroutineError;
+  } else if ((mtx->head != NULL) && (mtx->head != running)) {
+    return coroutineBusy;
   }
 
   if (mtx->coroutine == NULL) {
@@ -1343,6 +1559,21 @@ int coconditionBroadcast(Cocondition *cond) {
 
   if (cond != NULL) {
     cond->numSignals = cond->numWaiters;
+
+    CoconditionSignalCallback coconditionSignalCallback
+      = _globalCoconditionSignalCallback;
+#ifdef THREAD_SAFE_COROUTINES
+    if (_coroutineThreadingSupportEnabled) {
+      call_once(&_threadMetadataSetup, coroutineSetupThreadMetadata);
+      if (coroutineInitializeThreadMetadata(NULL)) {
+        coconditionSignalCallback
+          = (CoconditionSignalCallback*) tss_get(_tssCoconditionSignalCallback);
+      }
+    }
+#endif
+    if (coconditionSignalCallback != NULL) {
+      coconditionSignalCallback(cond);
+    }
   } else {
     returnValue = coroutineError;
   }
@@ -1402,6 +1633,21 @@ int coconditionSignal(Cocondition *cond) {
 
   if ((cond != NULL) && (cond->numWaiters > 0)) {
     cond->numSignals++;
+
+    CoconditionSignalCallback coconditionSignalCallback
+      = _globalCoconditionSignalCallback;
+#ifdef THREAD_SAFE_COROUTINES
+    if (_coroutineThreadingSupportEnabled) {
+      call_once(&_threadMetadataSetup, coroutineSetupThreadMetadata);
+      if (coroutineInitializeThreadMetadata(NULL)) {
+        coconditionSignalCallback
+          = (CoconditionSignalCallback*) tss_get(_tssCoconditionSignalCallback);
+      }
+    }
+#endif
+    if (coconditionSignalCallback != NULL) {
+      coconditionSignalCallback(cond);
+    }
   } else {
     returnValue = coroutineError;
   }
@@ -1431,6 +1677,8 @@ int coconditionTimedWait(Cocondition *cond, Comutex *mtx,
     // Cannot honor the request.
     return coroutineError;
   }
+  int64_t now = coroutinesGetNanoseconds(NULL);
+  int64_t delayTime = now + coroutinesGetNanoseconds(ts);
 
   // Clear the lastYieldValue before we do anything else.
   cond->lastYieldValue = NULL;
@@ -1465,36 +1713,30 @@ int coconditionTimedWait(Cocondition *cond, Comutex *mtx,
   }
 
   int returnValue = coroutineSuccess;
+  running->blockingCocondition = cond;
   while ((cond->numSignals == 0) || (cond->head != running)) {
-    cond->lastYieldValue = coroutineYield(COROUTINE_BLOCKED);
+    cond->lastYieldValue = coroutineYield(COROUTINE_TIMEDWAIT);
 
-    struct timespec now;
-    if (timespec_get(&now, TIME_UTC) == 0) {
-      uint64_t nowns = (now.tv_sec * 1000000000) + now.tv_nsec;
-      uint64_t tsns = (ts->tv_sec * 1000000000) + ts->tv_nsec;
-      if (nowns > tsns) {
-        returnValue = coroutineTimedout;
-        break;
-      }
-    } else if (cond->numSignals == 0) {
-      // timespec_get returned an error.  We have no valid time to wait.  We've
-      // already tried to wait once and that's the best we can do.
-      returnValue = coroutineError;
+    if (((cond->numSignals == 0) || (cond->head != running))
+      && (coroutinesGetNanoseconds(NULL) > delayTime)
+    ) {
+      returnValue = coroutineTimedout;
       break;
     }
   }
+  running->blockingCocondition = NULL;
   if ((returnValue == coroutineSuccess) && (cond->numSignals > 0)) {
+    // We are at the head of the queue.
     cond->numSignals--;
     cond->numWaiters--;
+    cond->head = running->nextToSignal;
     if (running->prevToSignal != NULL) {
       running->prevToSignal->nextToSignal = running->nextToSignal;
-    } else {
-      // We are the head of the queue.
-      cond->head = running->nextToSignal;
     }
     if (running->nextToSignal != NULL) {
       running->nextToSignal->prevToSignal = running->prevToSignal;
-    } else {
+    }
+    if (cond->tail == running) {
       // We are the tail of the queue;
       cond->tail = running->prevToSignal;
     }
@@ -1504,11 +1746,15 @@ int coconditionTimedWait(Cocondition *cond, Comutex *mtx,
     // manage the links accordingly.
     if (running->prevToSignal != NULL) {
       running->prevToSignal->nextToSignal = running->nextToSignal;
-    } else {
-      // We are the head node.
+    }
+    if (running->nextToSignal != NULL) {
+      running->nextToSignal->prevToSignal = running->prevToSignal;
+    }
+    if (cond->head == running) {
       cond->head = running->nextToSignal;
     }
     if (cond->tail == running) {
+      // We are the tail of the queue;
       cond->tail = running->prevToSignal;
     }
     cond->numWaiters--;
@@ -1516,6 +1762,8 @@ int coconditionTimedWait(Cocondition *cond, Comutex *mtx,
     // The condition has been destroyed out from under us.  Invalid state.
     returnValue = coroutineError;
   }
+  running->nextToSignal = NULL;
+  running->prevToSignal = NULL;
 
   comutexLock(mtx);
   return returnValue;
@@ -1571,22 +1819,22 @@ int coconditionWait(Cocondition *cond, Comutex *mtx) {
   }
 
   int returnValue = coroutineSuccess;
+  running->blockingCocondition = cond;
   while ((cond->numSignals == 0) || (cond->head != running)) {
-    cond->lastYieldValue = coroutineYield(COROUTINE_BLOCKED);
+    cond->lastYieldValue = coroutineYield(COROUTINE_WAIT);
   }
+  running->blockingCocondition = NULL;
   if (cond->numSignals > 0) {
     cond->numSignals--;
     cond->numWaiters--;
     cond->head = running->nextToSignal;
     if (running->prevToSignal != NULL) {
       running->prevToSignal->nextToSignal = running->nextToSignal;
-    } else {
-      // We are the head of the queue.
-      cond->head = running->nextToSignal;
     }
     if (running->nextToSignal != NULL) {
       running->nextToSignal->prevToSignal = running->prevToSignal;
-    } else {
+    }
+    if (cond->tail == running) {
       // We are the tail of the queue;
       cond->tail = running->prevToSignal;
     }
@@ -1594,6 +1842,8 @@ int coconditionWait(Cocondition *cond, Comutex *mtx) {
     // The condition has been destroyed out from under us.  Invalid state.
     returnValue = coroutineError;
   }
+  running->nextToSignal = NULL;
+  running->prevToSignal = NULL;
 
   comutexLock(mtx);
   return returnValue;
@@ -1730,12 +1980,15 @@ Comessage* comessageQueuePopType(int type) {
       // Desired type was found.  Remove the message from the queue.
       returnValue = cur;
       *prev = cur->next;
-      cur->next = NULL;
 
       if (coroutine->nextMessage == NULL) {
         // Empty queue.  Set coroutine->lastMessage to NULL too.
         coroutine->lastMessage = NULL;
       }
+      if (coroutine->lastMessage == cur) {
+        coroutine->lastMessage = cur->next;
+      }
+      cur->next = NULL;
     }
 
     comutexUnlock(&coroutine->messageLock);
@@ -1760,7 +2013,7 @@ Comessage* comessageQueuePopType(int type) {
 /// @return Returns the first message of the provided type if one is available
 /// before the specified time.  Returns NULL if no such message is available
 /// within that time period or if an error occurrs.
-Comessage* comessageWaitQueueForType_(
+Comessage* comessageQueueWaitForType_(
   int *type, const struct timespec *ts
 ) {
   Comessage *returnValue = NULL;
@@ -1797,12 +2050,15 @@ Comessage* comessageWaitQueueForType_(
         // Desired type was found.  Remove the message from the coroutine.
         returnValue = cur;
         *prev = cur->next;
-        cur->next = NULL;
 
         if (coroutine->nextMessage == NULL) {
           // Empty queue.  Set coroutine->lastMessage to NULL too.
           coroutine->lastMessage = NULL;
         }
+        if (coroutine->lastMessage == cur) {
+          coroutine->lastMessage = cur->next;
+        }
+        cur->next = NULL;
       } else {
         // Desired type was not found.  Block until something else is pushed.
         if (ts == NULL) {
@@ -1841,7 +2097,7 @@ Comessage* comessageWaitQueueForType_(
 /// before the specified time.  Returns NULL if no such message is available
 /// within that time period or if an error occurrs.
 Comessage* comessageQueueWait(const struct timespec *ts) {
-  return comessageWaitQueueForType_(NULL, ts);
+  return comessageQueueWaitForType_(NULL, ts);
 }
 
 /// @fn Comessage* comessageQueueWaitForType(int type, const struct timespec *ts)
@@ -1858,7 +2114,7 @@ Comessage* comessageQueueWait(const struct timespec *ts) {
 /// before the specified time.  Returns NULL if no such message is available
 /// within that time period or if an error occurrs.
 Comessage* comessageQueueWaitForType(int type, const struct timespec *ts) {
-  return comessageWaitQueueForType_(&type, ts);
+  return comessageQueueWaitForType_(&type, ts);
 }
 
 /// @fn int comessageQueuePush(Coroutine *coroutine, Comessage *comessage)
@@ -1943,7 +2199,6 @@ int comessageStartUse(Comessage *comessage) {
           // comessage->configured remains false
         }
       }
-      // Don't touch comessage->dynamically_allocated;
     } // Else this message is already setup
   } else {
     returnValue = coroutineError;
@@ -2041,7 +2296,7 @@ int comessageInit(
   comessage->waiting = waiting;
   comessage->done = false;
   // No need to set comessage->inUse since we called comessageStartUse above.
-  comessage->from = getRunningCoroutine();
+  // Don't touch comessage->from in case this message is being reused.
   returnValue = coroutineSuccess;
 
   return returnValue;
@@ -2127,19 +2382,22 @@ int comessageSetDone(Comessage *comessage) {
     if (comessage->waiting == true) {
       // Something is waiting.  Signal the waiters.  It will be up to them to
       // destroy this message again later.
-      coconditionBroadcast(&comessage->condition);
+      if (coconditionBroadcast(&comessage->condition) == coroutineSuccess) {
+        returnValue = coroutineSuccess;
+      } // else, returnValue remains coroutineError.
+    } else {
+      returnValue = coroutineSuccess;
     }
     comutexUnlock(&comessage->lock);
   } else {
     // Nothing we can do but set the done flag.
     comessage->done = true;
+    returnValue = coroutineSuccess;
   }
   // Don't touch comessage->from.
   // Don't touch comessage->condition.
   // Don't touch comessage->lock.
   // Don't touch comessage->configured.
-  // Don't touch comessage->dynamically_allocated.
-  returnValue = coroutineSuccess;
 
   return returnValue;
 }
@@ -2244,22 +2502,25 @@ Comessage* comessageWaitForReplyWithType_(
   if (sent == NULL) {
     // Invalid.
     return reply; // NULL
-  } else if (comessageWaitForDone(sent, ts) != coroutineSuccess) {
+  }
+
+  // We need to grab the original recipient of the message that was sent before
+  // we wait for done in case the recipient reuses this message as the reply.
+  // message.
+  Coroutine *recipient = sent->to;
+
+  if (comessageWaitForDone(sent, ts) != coroutineSuccess) {
     // Invalid state of the message.  Fail.
     return reply; // NULL
   }
 
-  // Recipient has processed the message.  We now need to wait for their reply.
-  // Any message is valid as long as its from the recipient of the original
-  // message.
-  Coroutine *recipient = sent->to;
   if (releaseAfterDone == true) {
     // We're done with the message that was originally sent and the caller has
     // indicated that it is to be released now.
     comessageRelease(sent);
   }
 
-  // Enter our main wait loop.
+  // Recipient has processed the message.  We now need to wait for their reply.
   int lockStatus = coroutineSuccess;
   if (ts == NULL) {
     lockStatus = comutexLock(&coroutine->messageLock);
@@ -2282,6 +2543,8 @@ Comessage* comessageWaitForReplyWithType_(
     // of the loop below.
     searchType = *type;
   }
+
+  // Enter our main wait loop.
   int waitStatus = coroutineSuccess;
   while (reply == NULL) {
     while ((cur != NULL)
@@ -2297,12 +2560,15 @@ Comessage* comessageWaitForReplyWithType_(
       // Desired reply was found.  Remove the message from the coroutine.
       reply = cur;
       *prev = cur->next;
-      cur->next = NULL;
 
       if (coroutine->nextMessage == NULL) {
         // Empty queue.  Set coroutine->lastMessage to NULL too.
         coroutine->lastMessage = NULL;
       }
+      if (coroutine->lastMessage == cur) {
+        coroutine->lastMessage = cur->next;
+      }
+      cur->next = NULL;
     } else {
       // Desired reply was not found.  Block until something else is pushed.
       if (ts == NULL) {
