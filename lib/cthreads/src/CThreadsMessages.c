@@ -292,12 +292,15 @@ thrd_msg_t* thrd_msg_q_pop_type(int type) {
     // Desired type was found.  Remove the message from the queue.
     return_value = cur;
     *prev = cur->next;
-    cur->next = NULL;
     
     if (queue->head == NULL) {
       // Empty queue.  Set queue->tail to NULL too.
       queue->tail = NULL;
     }
+    if (queue->tail == cur) {
+      queue->tail = cur->next;
+    }
+    cur->next = NULL;
   }
   
   mtx_unlock(&queue->lock);
@@ -305,7 +308,7 @@ thrd_msg_t* thrd_msg_q_pop_type(int type) {
   return return_value;
 }
 
-/// @fn thrd_msg_t* thrd_msg_q_timedwait_for_type_(int *type, const struct timespec *ts)
+/// @fn thrd_msg_t* thrd_msg_q_wait_for_type_(int *type, const struct timespec *ts)
 ///
 /// @brief Wait for a message of a given type to be available in the message
 /// queue or until a specified time has elapsed.  Remove the message from the
@@ -321,7 +324,7 @@ thrd_msg_t* thrd_msg_q_pop_type(int type) {
 /// @return Returns the first message of the provided type if one is available
 /// before the specified time.  Returns NULL if no such message is available
 /// within that time period or if an error occurrs.
-thrd_msg_t* thrd_msg_q_timedwait_for_type_(int *type, const struct timespec *ts) {
+thrd_msg_t* thrd_msg_q_wait_for_type_(int *type, const struct timespec *ts) {
   thrd_msg_q_t *queue = get_thread_thrd_msg_q();
   thrd_msg_t *return_value = NULL;
   thrd_msg_t *cur = queue->head;
@@ -357,12 +360,15 @@ thrd_msg_t* thrd_msg_q_timedwait_for_type_(int *type, const struct timespec *ts)
       // Desired type was found.  Remove the message from the queue.
       return_value = cur;
       *prev = cur->next;
-      cur->next = NULL;
       
       if (queue->head == NULL) {
         // Empty queue.  Set queue->tail to NULL too.
         queue->tail = NULL;
       }
+      if (queue->tail == cur) {
+        queue->tail = cur->next;
+      }
+      cur->next = NULL;
     } else {
       // Desired type was not found.  Block until something else is pushed.
       if (ts == NULL) {
@@ -400,7 +406,7 @@ thrd_msg_t* thrd_msg_q_timedwait_for_type_(int *type, const struct timespec *ts)
 /// the specified time.  Returns NULL if no such message is available within
 /// that time period or if an error occurrs.
 thrd_msg_t* thrd_msg_q_wait(const struct timespec *ts) {
-  return thrd_msg_q_timedwait_for_type_(NULL, ts);
+  return thrd_msg_q_wait_for_type_(NULL, ts);
 }
 
 /// @fn thrd_msg_t* thrd_msg_q_wait_for_type(int type, const struct timespec *ts)
@@ -419,7 +425,7 @@ thrd_msg_t* thrd_msg_q_wait(const struct timespec *ts) {
 /// before the specified time.  Returns NULL if no such message is available
 /// within that time period or if an error occurrs.
 thrd_msg_t* thrd_msg_q_wait_for_type(int type, const struct timespec *ts) {
-  return thrd_msg_q_timedwait_for_type_(&type, ts);
+  return thrd_msg_q_wait_for_type_(&type, ts);
 }
 
 
@@ -898,12 +904,15 @@ thrd_msg_t* thrd_msg_wait_for_reply_with_type_(
       // Desired reply was found.  Remove the message from the coroutine.
       reply = cur;
       *prev = cur->next;
-      cur->next = NULL;
 
       if (queue->head == NULL) {
         // Empty queue.  Set coroutine->lastMessage to NULL too.
         queue->tail = NULL;
       }
+      if (queue->tail == cur) {
+        queue->tail = cur->next;
+      }
+      cur->next = NULL;
     } else {
       // Desired reply was not found.  Block until something else is pushed.
       if (ts == NULL) {
