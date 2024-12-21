@@ -1261,6 +1261,7 @@ int comutexInit(Comutex *mtx, int type) {
     mtx->type = type;
     mtx->coroutine = NULL;
     mtx->recursionLevel = 0;
+    mtx->head = NULL;
   } else {
     returnValue = coroutineError;
   }
