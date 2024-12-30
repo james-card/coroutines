@@ -412,7 +412,7 @@ bool coroutineInitializeThreadMetadata(Coroutine *first) {
   }
   status = tss_set(
     _tssComutexUnlockCallback,
-    &_globalComutexUnlockCallback
+    NULL
   );
   if (status != thrd_success) {
     fprintf(stderr,
@@ -423,7 +423,7 @@ bool coroutineInitializeThreadMetadata(Coroutine *first) {
   }
   status = tss_set(
     _tssCoconditionSignalCallback,
-    &_globalCoconditionSignalCallback
+    NULL
   );
   if (status != thrd_success) {
     fprintf(stderr,
@@ -664,7 +664,7 @@ void* coroutineYield(void *arg) {
   return returnValue;
 }
 
-/// @fn Coroutine* coroutineInit(Coroutine *userCoroutine, CoroutineFunction func)
+/// @fn Coroutine* coroutineInit(Coroutine *userCoroutine, CoroutineFunction func, void *arg)
 ///
 /// @brief The coroutine initialization function.
 ///
@@ -827,7 +827,7 @@ Coroutine* coroutineInit(Coroutine *userCoroutine,
 /// coroutine or pulls one off the idle list and initializes it.
 /// After the coroutine is initialized with the provided function,
 /// coroutineResume is called with the provided argument to pass the arugment
-/// into the 
+/// into the coroutine.
 ///
 /// @note This is mostly for compatibility with thrd_create in the C threads
 /// specification.
@@ -1166,6 +1166,7 @@ int coroutineTerminate(Coroutine *targetCoroutine, Comutex **mutexes) {
   }
 
   // Halt the coroutine.
+  targetCoroutine->id = COROUTINE_ID_NOT_SET;
   targetCoroutine->state = COROUTINE_STATE_NOT_RUNNING;
   memcpy(&targetCoroutine->context, &targetCoroutine->resetContext, sizeof(jmp_buf));
 #ifdef THREAD_SAFE_COROUTINES
