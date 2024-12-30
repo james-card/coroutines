@@ -211,10 +211,10 @@ int loadAndRunCoroutines(void *args) {
 
   Coroutine mainCoroutine;
 
-  if (coroutineConfig(NULL, 1024, NULL, NULL) != coroutineSuccess) {
+  if (coroutineConfig(NULL, 1024, NULL, NULL, NULL) != coroutineSuccess) {
     fprintf(stderr, "ERROR:  Could not set coroutine stack size to 1K.\n");
   }
-  if (coroutineConfig(&mainCoroutine, 8192, NULL, NULL) != coroutineSuccess) {
+  if (coroutineConfig(&mainCoroutine, 8192, NULL, NULL, NULL) != coroutineSuccess) {
     fprintf(stderr, "ERROR:  Could not set coroutine stack size to 4K.\n");
   }
 
@@ -242,13 +242,13 @@ int loadAndRunCoroutines(void *args) {
 
   // Instantiate and initialize the coroutines.
   for (int i = 0; i < NUM_COROUTINES; i++) {
-    coroutineArray[i] = coroutineCreate(coroutine);
+    coroutineArray[i] = coroutineInit(NULL, coroutine, &coroutineArgs);
     if (coroutineArray[i] == NULL) {
       fprintf(stderr, "Could not initialize coroutine %d.\n", i);
       return 1;
     }
     coroutineSetId(coroutineArray[i], i);
-    coroutineResume(coroutineArray[i], &coroutineArgs);
+    coroutineResume(coroutineArray[i], NULL);
   }
 
   coconditionBroadcast(&cocondition);

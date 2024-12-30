@@ -90,11 +90,24 @@ extern "C"
 /// provided coroutine is waiting on a condition or mutex.
 #define COROUTINE_WAIT ((void*) ((intptr_t) -3))
 
+/// @def COROUTINE_CORRUPT
+///
+/// @brief Special value to indicate to a caller of coroutineResume() that the
+/// provided coroutine's state has been corrupted and is not longer usable.
+#define COROUTINE_CORRUPT ((void*) ((intptr_t) -4))
+
+/// @def COROUTINE_GUARD_VALUE
+///
+/// @brief The value to set for a Coroutine's guard1 and guard2 elements and to
+/// check against in coroutineResume before a resume of a coroutine is
+/// attempted.
+#define COROUTINE_GUARD_VALUE 0x4abc4abc
+
 /// @def COROUTINE_STACK_CHUNK_SIZE
 ///
 /// @brief The size of a single chunk of the stack allocated by
 /// coroutineAllocateStack.
-#define COROUTINE_STACK_CHUNK_SIZE 512
+#define COROUTINE_STACK_CHUNK_SIZE 64
 
 /// @def COROUTINE_DEFAULT_STACK_SIZE
 ///
@@ -103,32 +116,32 @@ extern "C"
 #define COROUTINE_DEFAULT_STACK_SIZE 16384
 #endif
 
-/// @def COROUTINE_ID_TYPE
+/// @def CoroutineId
 ///
 /// @brief The integer type to use for coroutine IDs.  Defaults to 64-bit IDs
 /// if none is provided.
-#ifndef COROUTINE_ID_TYPE
-#define COROUTINE_ID_TYPE uint64_t
+#ifndef CoroutineId
+#define CoroutineId uint64_t
 #endif
 
 /// @def COROUTINE_ID_TYPE_int64_t_int64_t
 ///
-/// @brief Define that gets matched when COROUTINE_ID_TYPE is an int64_t.
+/// @brief Define that gets matched when CoroutineId is an int64_t.
 #define COROUTINE_ID_TYPE_uint64_t_uint64_t 1
 
 /// @def COROUTINE_ID_TYPE_int32_t_int32_t
 ///
-/// @brief Define that gets matched when COROUTINE_ID_TYPE is an int32_t.
+/// @brief Define that gets matched when CoroutineId is an int32_t.
 #define COROUTINE_ID_TYPE_uint32_t_uint32_t 1
 
 /// @def COROUTINE_ID_TYPE_int16_t_int16_t
 ///
-/// @brief Define that gets matched when COROUTINE_ID_TYPE is an int16_t.
+/// @brief Define that gets matched when CoroutineId is an int16_t.
 #define COROUTINE_ID_TYPE_uint16_t_uint16_t 1
 
 /// @def COROUTINE_ID_TYPE_int8_t_int8_t
 ///
-/// @brief Define that gets matched when COROUTINE_ID_TYPE is an int8_t.
+/// @brief Define that gets matched when CoroutineId is an int8_t.
 #define COROUTINE_ID_TYPE_uint8_t_uint8_t   1
 
 /// @def EXPAND_COROUTINE_ID_TYPE
@@ -150,17 +163,17 @@ extern "C"
 /// @brief Special value to indicate that a coroutine's ID value is not set.
 /// This is the initial value just after the coroutine constructor completes.
 #ifndef COROUTINE_ID_NOT_SET
-#if TEST_COROUTINE_ID_TYPE(COROUTINE_ID_TYPE, uint64_t)
+#if TEST_COROUTINE_ID_TYPE(CoroutineId, uint64_t)
 #define COROUTINE_ID_NOT_SET ((uint64_t) 0xffffffffffffffff)
-#elif TEST_COROUTINE_ID_TYPE(COROUTINE_ID_TYPE, uint32_t)
+#elif TEST_COROUTINE_ID_TYPE(CoroutineId, uint32_t)
 #define COROUTINE_ID_NOT_SET ((uint32_t) 0xffffffff)
-#elif TEST_COROUTINE_ID_TYPE(COROUTINE_ID_TYPE, uint16_t)
+#elif TEST_COROUTINE_ID_TYPE(CoroutineId, uint16_t)
 #define COROUTINE_ID_NOT_SET ((uint16_t) 0xffff)
-#elif TEST_COROUTINE_ID_TYPE(COROUTINE_ID_TYPE, uint8_t)
+#elif TEST_COROUTINE_ID_TYPE(CoroutineId, uint8_t)
 #define COROUTINE_ID_NOT_SET ((uint8_t) 0xff)
 #else
-#error "Invalid COROUTINE_ID_TYPE."
-#endif // COROUTINE_ID_TYPE
+#error "Invalid type for CoroutineId."
+#endif // CoroutineId
 #endif // COROUTINE_ID_NOT_SET
 
 /// @enum CoroutineState
@@ -188,13 +201,14 @@ typedef void* (*CoroutineFunction)(void *arg);
 ///
 /// @brief Function signature that can be used as a callback when a comutex is
 /// unlocked.
-typedef void (*ComutexUnlockCallback)(Comutex *comutex);
+typedef void (*ComutexUnlockCallback)(void *stateData, Comutex *comutex);
 
 /// @typedef CoconditionSignalCallback
 ///
 /// @brief Function signature that can be used as a callback when a cocondition
 /// is signalled.
-typedef void (*CoconditionSignalCallback)(Cocondition *cocondition);
+typedef void (*CoconditionSignalCallback)(void *stateData,
+  Cocondition *cocondition);
 
 /// @union CoroutineFuncData
 ///
@@ -232,12 +246,15 @@ typedef union CoroutineFuncData {
 /// @param recursionLevel The number of times this mutex has been successfully
 ///   locked in this coroutine.
 /// @param head The next coroutine in the queue to lock this mutex.
+/// @param timeoutTime The time at which a call to comutexTimedLock will
+///   timeout.
 typedef struct Comutex {
   void *lastYieldValue;
   int type;
   Coroutine *coroutine;
   int recursionLevel;
   Coroutine *head;
+  int64_t timeoutTime;
 } Comutex;
 
 // Coroutine condition support.
@@ -256,12 +273,15 @@ typedef struct Comutex {
 /// @param head The head of the coroutine queue (the next coroutine to signal).
 /// @param tail The tail of the coroutine queue (where the next waiting
 ///   coroutine will be added).
+/// @param timeoutTime The time at which a call to coconditionTimedWait will
+///   timeout.
 typedef struct Cocondition {
   void *lastYieldValue;
   int numWaiters;
   int numSignals;
   Coroutine *head;
   Coroutine *tail;
+  int64_t timeoutTime;
 } Cocondition;
 
 // Coroutine base support.
@@ -270,14 +290,19 @@ typedef struct Cocondition {
 ///
 /// @brief Data structure to manage an individual coroutine.
 ///
-/// @param next Pointer to the next Coroutine on the list.
+/// @param guard1 A well-known value to check for state corruption (stack
+///   overflow).
+/// @param nextInList Pointer to the next Coroutine in the list.
 /// @param context The jmp_buf to hold the context of the coroutine.
 /// @param id The ID of the coroutine.
 /// @param state The state of the coroutine.  (See enum above.)
 /// @param nextToLock The next coroutine to allow to lock a mutex.
+/// @param prevToLock The previous coroutine to allow to lock a mutex.
 /// @param nextToSignal The next coroutine to signal when waiting on a signal.
 /// @param prevToSignal The previous coroutine to signal when waiting on a
 ///   signal.
+/// @param resetContext The jmp_buf that holds the place on stack to jump to
+///   after a coroutine has been terminated and the value of context is reset.
 /// @param passed The CoroutineFuncData that's passed between contexts by the
 ///   coroutinePass function (on a yield or resume call).
 /// @param nextMessage A pointer to the next message that is waiting for the
@@ -287,10 +312,17 @@ typedef struct Cocondition {
 /// @param messageCondition A condition (Cocondition) that will allow for
 ///   signalling between coroutines when adding a message to the queue.
 /// @param messageLock A mutex (Comutex) to guard the message condition.
+/// @param blockingComutex A pointer to the mutex (Comutex) that the coroutine
+///   is currently waiting to lock.
+/// @param blockingCocondition A pointer to a condition (Cocondition) that the
+///   coroutine is currently waiting on to be signalled.
+/// @param guard2 A well-known value to check for state corruption (stack
+///   overflow).
 typedef struct Coroutine {
-  struct Coroutine *next;
+  uint32_t guard1;
+  struct Coroutine *nextInList;
   jmp_buf context;
-  COROUTINE_ID_TYPE id;
+  CoroutineId id;
   CoroutineState state;
   struct Coroutine *nextToLock;
   struct Coroutine *prevToLock;
@@ -304,6 +336,7 @@ typedef struct Coroutine {
   Comutex messageLock;
   Comutex *blockingComutex;
   Cocondition *blockingCocondition;
+  uint32_t guard2;
 } Coroutine;
 
 // Coroutine message support.
@@ -346,6 +379,9 @@ typedef struct Comessage {
   bool configured;
 } Comessage;
 
+// Support functions
+int64_t coroutineGetNanoseconds(const struct timespec *ts);
+
 /// @def coroutineResumable(coroutinePointer)
 ///
 /// @brief Examines a coroutine to determine whether or not it can be resumed.
@@ -356,7 +392,7 @@ typedef struct Comessage {
 /// @return Returns false when the coroutine has run to completion or when it is
 /// blocked inside coroutineResume() and true otherwise.
 #define coroutineResumable(coroutinePointer) \
-  (((coroutinePointer) != NULL) && ((coroutinePointer)->next == NULL))
+  (((coroutinePointer) != NULL) && ((coroutinePointer)->nextInList == NULL))
 
 /// @def coroutineFinished(coroutinePointer)
 ///
@@ -384,21 +420,24 @@ typedef struct Comessage {
 
 
 // Coroutine function prototypes.  Doxygen inline in source file.
-int coroutineConfig(Coroutine *first, int stackSize,
+int coroutineConfig(Coroutine *first, int stackSize, void *stateData,
   ComutexUnlockCallback comutexUnlockCallback,
   CoconditionSignalCallback coconditionSignalCallback
 );
-Coroutine* coroutineCreate(CoroutineFunction func);
+Coroutine* coroutineInit(Coroutine *userCoroutine,
+  CoroutineFunction func, void *arg);
+int coroutineCreate(Coroutine **coroutine, CoroutineFunction func, void *arg);
 void* coroutineResume(Coroutine *targetCoroutine, void *arg);
 void* coroutineYield(void *arg);
-int coroutineSetId(Coroutine *coroutine, COROUTINE_ID_TYPE id);
-COROUTINE_ID_TYPE coroutineId(Coroutine *coroutine);
+int coroutineSetId(Coroutine *coroutine, CoroutineId id);
+CoroutineId coroutineId(Coroutine *coroutine);
 CoroutineState coroutineState(Coroutine *coroutine);
 #ifdef THREAD_SAFE_COROUTINES
 void coroutineSetThreadingSupportEnabled(bool state);
 bool coroutineThreadingSupportEnabled();
 #endif
 int coroutineTerminate(Coroutine *targetCoroutine, Comutex **mutexes);
+Coroutine* getRunningCoroutine(void);
 
 
 // Coroutine mutex function prototypes.  Doxygen inline in source file.
