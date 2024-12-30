@@ -77,7 +77,7 @@ void* coroutine(void *args) {
   Comutex *comutex = coroutineArgs->comutex;
   Cocondition *cocondition = coroutineArgs->cocondition;
   int *coroutineStorage = coroutineArgs->coroutineStorage;
-  int functionNumber = coroutineStorage[coroutineId(NULL)];
+  int functionNumber = coroutineStorage[coroutineId(getRunningCoroutine())];
   bool mutexLocked = false;
 
   comutexLock(comutex);
@@ -107,7 +107,7 @@ void* coroutine(void *args) {
       // Update our function number and globalInt.
       coroutineArgs = (CoroutineArgs*) lastYieldValue;
       coroutineStorage = coroutineArgs->coroutineStorage;
-      functionNumber = coroutineStorage[coroutineId(NULL)];
+      functionNumber = coroutineStorage[coroutineId(getRunningCoroutine())];
       globalInt = coroutineArgs->globalInt;
     }
 
