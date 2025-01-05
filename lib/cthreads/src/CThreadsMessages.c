@@ -275,8 +275,9 @@ thrd_msg_t* thrd_msg_q_pop(void) {
 thrd_msg_t* thrd_msg_q_pop_type(int type) {
   thrd_msg_q_t *queue = get_thread_thrd_msg_q();
   thrd_msg_t *return_value = NULL;
+  thrd_msg_t *prev = NULL;
   thrd_msg_t *cur = queue->head;
-  thrd_msg_t **prev = &queue->head;
+  thrd_msg_t **prev_next = &queue->head;
   
   if (mtx_lock(&queue->lock) != thrd_success) {
     // Error case.
@@ -284,21 +285,22 @@ thrd_msg_t* thrd_msg_q_pop_type(int type) {
   }
   
   while ((cur != NULL) && (cur->type != type)) {
-    prev = &cur->next;
+    prev = cur;
+    prev_next = &cur->next;
     cur = cur->next;
   }
   
   if (cur != NULL) {
     // Desired type was found.  Remove the message from the queue.
     return_value = cur;
-    *prev = cur->next;
+    *prev_next = cur->next;
     
     if (queue->head == NULL) {
       // Empty queue.  Set queue->tail to NULL too.
       queue->tail = NULL;
     }
     if (queue->tail == cur) {
-      queue->tail = cur->next;
+      queue->tail = prev;
     }
     cur->next = NULL;
   }
@@ -327,8 +329,9 @@ thrd_msg_t* thrd_msg_q_pop_type(int type) {
 thrd_msg_t* thrd_msg_q_wait_for_type_(int *type, const struct timespec *ts) {
   thrd_msg_q_t *queue = get_thread_thrd_msg_q();
   thrd_msg_t *return_value = NULL;
+  thrd_msg_t *prev = NULL;
   thrd_msg_t *cur = queue->head;
-  thrd_msg_t **prev = &queue->head;
+  thrd_msg_t **prev_next = &queue->head;
   int lock_status = thrd_success;
   int wait_status = thrd_success;
   int search_type = 0;
@@ -352,21 +355,22 @@ thrd_msg_t* thrd_msg_q_wait_for_type_(int *type, const struct timespec *ts) {
   
   while (return_value == NULL) {
     while ((cur != NULL) && (type != NULL) && (cur->type != search_type)) {
-      prev = &cur->next;
+      prev = cur;
+      prev_next = &cur->next;
       cur = cur->next;
     }
     
     if (cur != NULL) {
       // Desired type was found.  Remove the message from the queue.
       return_value = cur;
-      *prev = cur->next;
+      *prev_next = cur->next;
       
       if (queue->head == NULL) {
         // Empty queue.  Set queue->tail to NULL too.
         queue->tail = NULL;
       }
       if (queue->tail == cur) {
-        queue->tail = cur->next;
+        queue->tail = prev;
       }
       cur->next = NULL;
     } else {
@@ -383,8 +387,9 @@ thrd_msg_t* thrd_msg_q_wait_for_type_(int *type, const struct timespec *ts) {
       // we won't continue the loop if we've exceeded our timeout.
     }
     
+    prev = NULL;
     cur = queue->head;
-    prev = &queue->head;
+    prev_next = &queue->head;
   }
   
   mtx_unlock(&queue->lock);
@@ -879,8 +884,9 @@ thrd_msg_t* thrd_msg_wait_for_reply_with_type_(
 
   // comutexTimedLock will return coroutineTimedout if the timeout is
   // reached, so we'll never reach this point if we've exceeded our timeout.
+  thrd_msg_t *prev = NULL;
   thrd_msg_t *cur = queue->head;
-  thrd_msg_t **prev = &queue->head;
+  thrd_msg_t **prev_next = &queue->head;
   int searchType = 0;
   if (type != NULL) {
     // This saves us from having to dereference the pointer in every iteration
@@ -896,21 +902,22 @@ thrd_msg_t* thrd_msg_wait_for_reply_with_type_(
         || ((type != NULL) && (cur->type != searchType))
       )
     ) {
-      prev = &cur->next;
+      prev = cur;
+      prev_next = &cur->next;
       cur = cur->next;
     }
 
     if (cur != NULL) {
       // Desired reply was found.  Remove the message from the coroutine.
       reply = cur;
-      *prev = cur->next;
+      *prev_next = cur->next;
 
       if (queue->head == NULL) {
         // Empty queue.  Set coroutine->lastMessage to NULL too.
         queue->tail = NULL;
       }
       if (queue->tail == cur) {
-        queue->tail = cur->next;
+        queue->tail = prev;
       }
       cur->next = NULL;
     } else {
@@ -929,8 +936,9 @@ thrd_msg_t* thrd_msg_wait_for_reply_with_type_(
       // reached, so we won't continue the loop if we've exceeded our timeout.
     }
 
+    prev = NULL;
     cur = queue->head;
-    prev = &queue->head;
+    prev_next = &queue->head;
   }
 
   mtx_unlock(&queue->lock);
